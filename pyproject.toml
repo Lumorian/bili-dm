@@ -8,6 +8,7 @@ dependencies = [
     "PyQt6",
     "qasync",
     "kotonoha",
+    "pyyaml>=6.0.3",
 ]
 
 [tool.uv.sources]
