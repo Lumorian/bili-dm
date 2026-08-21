@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QColor, QFont, QPainter, QTextLayout
+from PyQt6.QtGui import QColor, QFont, QPainter
 from PyQt6.QtWidgets import QWidget
 
 from .lifecycle import Row, Wall
@@ -14,11 +14,13 @@ class WallWidget(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._font = QFont()
+        self._size = 13  # set_font() 未调用前的默认像素字号(与历史硬编码一致)
         self._wall: Wall | None = None
         self._now = 0.0
         self._show_tag = False
 
     def set_font(self, family: str, size: int) -> None:
+        self._size = size
         self._font = QFont(family, size)
         self.update()
 
@@ -60,9 +62,8 @@ class WallWidget(QWidget):
         painter.end()
 
     def _paint_row(self, painter: QPainter, row: Row, spec, y: float, alpha: float) -> float:
-        size = 13 * spec.size_scale
         font = QFont(self._font)
-        font.setPixelSize(int(size))
+        font.setPixelSize(int(self._size * spec.size_scale))
         painter.setFont(font)
         fm = painter.fontMetrics()
         tag = ""
