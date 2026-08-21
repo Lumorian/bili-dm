@@ -78,3 +78,21 @@ def test_live_socket_not_removed(tmp_path):
     with pytest.raises(OSError, match="already in use"):
         ensure_stale_socket_removed(sock)
     s.close()
+
+
+async def test_stop_never_started_leaves_foreign_socket(tmp_path):
+    """从未 start() 的服务端在 stop() 时不得删除他人(另一实例)正在监听的 socket。"""
+    import socket
+
+    sock = os.path.join(str(tmp_path), "foreign.sock")
+    srv = DanmakuServer(sock, lambda d: None)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(sock)
+    s.listen(1)
+    try:
+        await srv.stop()  # server never started, but the socket belongs to someone else
+        assert os.path.exists(sock)
+    finally:
+        s.close()
+        if os.path.exists(sock):
+            os.unlink(sock)

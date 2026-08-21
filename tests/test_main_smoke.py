@@ -68,3 +68,46 @@ def test_demo_generator_yields_messages(app):
         assert sink[0].type in {"chat", "gift", "superchat", "subscribe"}
 
     asyncio.run(_collect())
+
+
+def test_second_instance_exits_when_socket_taken(tmp_path, monkeypatch, caplog):
+    """第二份实例启动失败:显式退出(exit 1)、报错明确,且不得删掉第一份实例的活 socket。"""
+    import sys
+
+    import qasync
+    from PyQt6.QtWidgets import QApplication
+
+    from bilidm_overlay import main
+    from bilidm_overlay.client import DanmakuServer
+    from bilidm_overlay.config import Config
+
+    sock = str(tmp_path / "inuse.sock")
+
+    async def _bind_first() -> DanmakuServer:
+        srv = DanmakuServer(sock, lambda d: None)
+        await srv.start()
+        return srv
+
+    first = None
+    try:
+        first = asyncio.run(_bind_first())
+
+        # entry_point 会二次构造 QApplication(套件里已存在)并注册真实信号 handler
+        # (会污染 pytest 进程) —— 均在测试内打桩。
+        monkeypatch.setattr(main, "QApplication", lambda argv: QApplication.instance() or QApplication(argv))
+        monkeypatch.setattr(main, "load", lambda p: Config(socket=sock))
+        monkeypatch.setattr(
+            qasync.QEventLoop, "add_signal_handler", lambda self, sig, cb: None
+        )
+        monkeypatch.setattr(sys, "argv", ["bilidm-overlay", "--socket", sock, "--no-tray"])
+
+        with pytest.raises(SystemExit) as exc:
+            main.entry_point()
+        assert exc.value.code == 1, "启动失败必须以非零退出"
+        assert "另一个 overlay 实例" in caplog.text
+        assert os.path.exists(sock), "第一份实例的 socket 必须幸存"
+    finally:
+        if first is not None:
+            asyncio.run(first.stop())
+        if os.path.exists(sock):
+            os.unlink(sock)

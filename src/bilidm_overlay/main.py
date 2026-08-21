@@ -90,6 +90,7 @@ def entry_point() -> None:
 
     windows = _build_windows(cfg)
     server: DanmakuServer | None = None
+    exit_code = 0
     if not args.demo:
         server = DanmakuServer(cfg.socket, lambda d: [w.feed(d) for w in windows])
 
@@ -105,8 +106,21 @@ def entry_point() -> None:
         status_check.start()
 
     async def _run() -> None:
+        # 信号先行:即使 server 启动失败,退出也走已注册的 loop.stop() 清理路径。
+        loop.add_signal_handler(signal.SIGINT, loop.stop)
+        loop.add_signal_handler(signal.SIGTERM, loop.stop)
         if server is not None:
-            await server.start()
+            try:
+                await server.start()
+            except OSError as exc:
+                # 启动失败(典型:socket 已被另一实例占用)必须显式退出,否则窗口
+                # 配着一个从不接收消息的服务端继续显示"离线";若还带着未绑定的
+                # server 走 finally,_stop() 在旧实现里会误删占用者的活 socket。
+                logger.error("socket 已被占用,另一个 overlay 实例在运行? %s", exc)
+                nonlocal exit_code
+                exit_code = 1
+                loop.stop()
+                return
         if args.demo:
             async def _demo_loop() -> None:
                 for i in range(60):
@@ -115,8 +129,6 @@ def entry_point() -> None:
                     await asyncio.sleep(0.4)
 
             asyncio.create_task(_demo_loop())
-        loop.add_signal_handler(signal.SIGINT, loop.stop)
-        loop.add_signal_handler(signal.SIGTERM, loop.stop)
 
     async def _stop() -> None:
         if server is not None:
@@ -131,6 +143,8 @@ def entry_point() -> None:
         loop.run_forever()
     finally:
         loop.run_until_complete(_stop())
+    if exit_code:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":

@@ -46,14 +46,16 @@ class DanmakuServer:
         for writer in list(self._conns):
             writer.close()
         self._conns.clear()
+        # 只清理自己成功绑定的 socket:start() 失败(如 socket 已被另一实例占用)时
+        # _server 为 None,此时 unlink 会删掉占用者的活 socket。
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        try:
-            os.unlink(self._path)
-        except FileNotFoundError:
-            pass
+            try:
+                os.unlink(self._path)
+            except FileNotFoundError:
+                pass
 
     async def _handler(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._conns.add(writer)
