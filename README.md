@@ -51,6 +51,8 @@ scripts/stop.sh --room bilibili:689422
 >
 > `dmnotifier start/stop/list` 仅管理 UniBarrage 远端监听;`dmnotifier run` 才是无头管道进程本身(消息推进由 float 插件完成,见 dmnotifier 配置 `~/.config/dmnotifier/config.yaml`;想用 TUI 人工管理也可以,等效)。
 
+> 已知限制:悬浮窗目前渲染在屏幕**左上角**——Wayland layer-shell 的锚点定在 Top|Left(kotonoha 桥接层如此生成)。规格里的左下角定位需要 kotonoha 桥接层支持底部锚点,属于跨仓库变更,已列入待办追踪;当前版本用户看到的是左上角悬浮窗。
+
 ## niri keybind 示例
 
 绑定 `Mod+G` 直接拉起叠加层(UniBarrage 需已在运行,只需成功启动过一次):

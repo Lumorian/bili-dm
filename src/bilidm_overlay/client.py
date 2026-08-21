@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import socket
+import stat
 from collections.abc import Callable
 
 from .danmaku.model import Danmaku, parse_message
@@ -14,7 +15,17 @@ logger = logging.getLogger(__name__)
 
 
 def ensure_stale_socket_removed(socket_path: str) -> None:
-    """探测残留 socket:能连上说明有人在用,抛错;连接被拒说明是残留文件,删除。"""
+    """探测残留 socket:能连上说明有人在用,抛错;连接被拒且是 socket 类型文件,删除。
+
+    先按文件类型守卫:普通文件(如配置路径打错指到用户数据)绝不修改——socket 上
+    connect 也会抛 ConnectionRefusedError,若无类型检查会把普通文件当成残留 socket 删掉。
+    """
+    try:
+        mode = os.stat(socket_path).st_mode
+    except FileNotFoundError:
+        return  # 不存在,无需处理
+    if not stat.S_ISSOCK(mode):
+        raise OSError(f"path exists but is not a socket: {socket_path}")
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         s.connect(socket_path)

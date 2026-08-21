@@ -42,13 +42,34 @@ done
 # 无头管道进程:把弹幕经 float 插件推给 overlay(日志走 stderr,stdout 保持干净)。
 # 必须在 `dmnotifier start` 之后启动:`start` 把房间写入 config history,
 # `run` 再按 history 逐个订阅(start 与 run 为顺序执行,history 已落盘)。
-"$DMNOTIFIER_BIN" run &
-RUN_PID=$!
-trap 'if [[ -n "${RUN_PID:-}" ]]; then kill "$RUN_PID" 2>/dev/null || true; fi' EXIT
-sleep 0.3
-if ! kill -0 "$RUN_PID" 2>/dev/null; then
-  echo "错误: dmnotifier run 启动失败,该二进制可能不含 run 子命令(用 DMNOTIFIER_BIN 指向新构建)。" >&2
-  exit 1
+# 幂等防护:同一条 run 管道已在跑时不重复拉起(重复拉起会弹幕双份);上次 chain 被
+# kill 掉没走到 EXIT trap 时残留的孤单 run 也会被 pgrep 检出,后续 start.sh 直接跳过。
+RUN_PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/bilidm-dmnotifier-run.pid"
+if command -v pgrep >/dev/null 2>&1; then
+  RUN_ALIVE() { pgrep -f "${DMNOTIFIER_BIN} run" >/dev/null 2>&1; }
+else
+  # pgrep 不可用(非 procps 系统):回退到 PID 文件探测。
+  RUN_ALIVE() {
+    [[ -f "$RUN_PIDFILE" ]] || return 1
+    local pid
+    pid="$(cat "$RUN_PIDFILE" 2>/dev/null || true)"
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+  }
+fi
+if RUN_ALIVE; then
+  echo "dmnotifier run 已在运行,跳过"
+else
+  "$DMNOTIFIER_BIN" run &
+  RUN_PID=$!
+  echo "$RUN_PID" > "$RUN_PIDFILE"
+fi
+trap 'if [[ -n "${RUN_PID:-}" ]]; then kill "$RUN_PID" 2>/dev/null || true; rm -f "$RUN_PIDFILE"; fi' EXIT
+if [[ -n "${RUN_PID:-}" ]]; then
+  sleep 0.3
+  if ! kill -0 "$RUN_PID" 2>/dev/null; then
+    echo "错误: dmnotifier run 启动失败,该二进制可能不含 run 子命令(用 DMNOTIFIER_BIN 指向新构建)。" >&2
+    exit 1
+  fi
 fi
 
 # 组装 --room 参数,透传给 overlay(房间分组/标签由 overlay 配置决定)

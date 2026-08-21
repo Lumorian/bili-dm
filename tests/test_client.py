@@ -80,6 +80,20 @@ def test_live_socket_not_removed(tmp_path):
     s.close()
 
 
+def test_regular_file_not_unlinked(tmp_path):
+    """路径存在但不是 socket(常见于配置路径打错):必须抛错且绝不删除文件。"""
+    f = tmp_path / "user-data.txt"
+    f.write_text("precious user data")
+    with pytest.raises(OSError, match="not a socket"):
+        ensure_stale_socket_removed(str(f))
+    assert f.exists()
+    assert f.read_text() == "precious user data"
+
+
+def test_missing_path_noop(tmp_path):
+    ensure_stale_socket_removed(str(tmp_path / "never-existed.sock"))  # 不抛错即可
+
+
 async def test_stop_never_started_leaves_foreign_socket(tmp_path):
     """从未 start() 的服务端在 stop() 时不得删除他人(另一实例)正在监听的 socket。"""
     import socket
