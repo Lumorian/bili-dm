@@ -8,7 +8,7 @@
 
 - 悬浮滚动墙:Chat/礼物/SC/订阅分别着色与加粗/描边,行数上限 + TTL 淡出
 - 按房间过滤(multi-room 合并显示或 per-room 独立窗口),详情在 `~/.config/bilidm-overlay/config.yaml`
-- 全窗口点击穿透(默认开;托盘菜单可切),不挡鼠标点选下层窗口
+- 全窗口点击穿透(默认开;托盘菜单可切),不挡鼠标点选下层窗口(穿透与设置项经托盘菜单验证,未做物理点击注入测试)
 - dmnotifier 断线自动重连(重连期间窗口显示"离线,连接中…")
 - 无头演示:`uv run bilidm-overlay --demo`
 
@@ -29,27 +29,31 @@ sudo pacman -S uv qt6-wayland iproute2 noto-fonts-cjk
 ## 用法
 
 ```bash
-# 一键拉起:起 UniBarrage 监听 → 启动悬浮窗
+# 一键拉起:注册 UniBarrage 监听 → 无头管道(dmnotifier run)→ 悬浮窗
 scripts/start.sh --room bilibili:689422
 
-# 多房间、或带 cookie(bilibili:789422:COOKIE 格式,只取前两个冒号)
+# 多房间,或带 cookie(bilibili:789422:COOKIE 格式,只取前两个冒号)
 scripts/start.sh --room bilibili:689422 --room bilibili:789422
 
 # 停止:停止 UniBarrage 监听 + 杀掉 overlay
 scripts/stop.sh --room bilibili:689422
 ```
 
-> 当前 dmnotifier 二进制需要 float 插件才能把弹幕推给 overlay;仓库内默认查找 `../dmnotifier/dmnotifier`,也可显式指定:
+**弹幕只有在一个管道进程运行时才会出现。** `scripts/start.sh` 依次做三件事:`dmnotifier start <room>`(向 UniBarrage 注册监听,并把房间写入 dmnotifier 的 config history)→ `dmnotifier run`(无头管道进程,按 history 自动订阅,经 float 插件把弹幕写入 socket)→ 最后拉起悬浮窗。如果你用别的方式启动悬浮窗(例如直接 `uv run bilidm-overlay --room bilibili:689422`),需要先有一个管道进程在跑——要么开着 `dmnotifier` TUI 并在里面订阅房间,要么手动 `dmnotifier start <room> && dmnotifier run`(后台运行、日志走 stderr);否则窗口只显示"dmnotifier 离线,连接中…"。
+
+> 只有注册监听(`dmnotifier start`,即上式里的 cookie)需要"platform:rid[:cookie]"形态;cookie 仅被 UniBarrage 用以拉取弹幕,悬浮窗侧不解析。按房间过滤时(`config.yaml` 的 per-room 模式或 `--per-room`),过滤键就是 `platform:rid` 本身(cookie 不参与匹配)。
+
+> 当前 dmnotifier 二进制需要 float 插件且支持 `run` 子命令才能把弹幕推给 overlay;仓库内默认查找 `../dmnotifier/dmnotifier`,也可显式指定:
 >
 > ```bash
 > DMNOTIFIER_BIN=/path/to/dmnotifier-with-float scripts/start.sh --room bilibili:689422
 > ```
 >
-> `dmnotifier start/stop/list` 仅管理 UniBarrage 远端监听;消息推进由 float 插件完成(见 dmnotifier 配置 `~/.config/dmnotifier/config.yaml`)。
+> `dmnotifier start/stop/list` 仅管理 UniBarrage 远端监听;`dmnotifier run` 才是无头管道进程本身(消息推进由 float 插件完成,见 dmnotifier 配置 `~/.config/dmnotifier/config.yaml`;想用 TUI 人工管理也可以,等效)。
 
 ## niri keybind 示例
 
-绑定 `Mod+G` 直接拉起叠加层:
+绑定 `Mod+G` 直接拉起叠加层(UniBarrage 需已在运行,只需成功启动过一次):
 
 ```niri
 binds = { Mod+G = spawn "bash" "-c" "/home/lumorian/Projects/bili-dm/overlay/scripts/start.sh --room bilibili:689422" }
