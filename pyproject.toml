@@ -1,0 +1,40 @@
+[project]
+name = "bilidm-overlay"
+version = "0.1.0"
+description = "Floating click-through danmaku overlay for bilibili live rooms (Wayland)"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "PyQt6",
+    "qasync",
+    "kotonoha",
+]
+
+[tool.uv.sources]
+kotonoha = { path = "../kotonoha" }
+
+[project.scripts]
+bilidm-overlay = "bilidm_overlay.main:entry_point"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bilidm_overlay"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
