@@ -55,3 +55,13 @@ def test_missing_time_becomes_none():
 def test_bad_json_raises_value_error():
     with pytest.raises(ValueError):
         parse_message("not json")
+
+
+def test_parses_avatar_field():
+    d = parse_message('{"type":"chat","name":"A","avatar":"https://i0.hdslb.com/x.png"}')
+    assert d.avatar == "https://i0.hdslb.com/x.png"
+
+
+def test_missing_avatar_is_empty():
+    d = parse_message('{"type":"chat","name":"A"}')
+    assert d.avatar == ""

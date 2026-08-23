@@ -15,6 +15,7 @@ class Danmaku:
     type: str = "unknown"
     name: str = ""
     content: str = ""
+    avatar: str = ""
     item: str | None = None
     num: int = 1
     price: float | None = None
@@ -31,6 +32,7 @@ def parse_message(line: str) -> Danmaku:
         type=str(raw.get("type", "unknown")).lower(),
         name=str(raw.get("name", "")),
         content=str(raw.get("content", "")),
+        avatar=str(raw.get("avatar", "")),
     )
     raw_time = raw.get("time")
     if raw_time:
