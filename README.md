@@ -6,8 +6,10 @@
 
 ## 功能
 
-- 悬浮滚动墙:Chat/礼物/SC/订阅分别着色与加粗/描边,行数上限 + TTL 淡出
-- 按房间过滤(multi-room 合并显示或 per-room 独立窗口),详情在 `~/.config/bilidm-overlay/config.yaml`
+- 悬浮滚动墙:Chat/礼物/SC/订阅分别着色与加粗/描边;**行数按面板高度自适应,新消息自动滚到底部**,TTL 默认 30s 淡出(可配置)
+- **房间管理在窗口内**:非穿透时窗口顶部工具条(🔓/⚙)或托盘「设置…」打开;对话框列出 UniBarrage 当前服务,可添加(平台+rid+可选 cookie)与删除,保存后 dmnotifier run 每 5s 自动对齐订阅,无需重启
+- **窗口交互**:非穿透时左键拖动移动、右下角手柄缩放,位置/尺寸写入 `~/.config/bilidm-overlay/config.yaml` 下次启动恢复
+- **行首 20px 圆形头像**:异步加载 + 磁盘缓存(`~/.cache/bilidm-overlay/avatars/`),未就绪时灰色圆形占位(名字首字)
 - 全窗口点击穿透(默认开;托盘菜单可切),不挡鼠标点选下层窗口(穿透与设置项经托盘菜单验证,未做物理点击注入测试)
 - dmnotifier 断线自动重连(重连期间窗口显示"离线,连接中…")
 - 无头演示:`uv run bilidm-overlay --demo`
