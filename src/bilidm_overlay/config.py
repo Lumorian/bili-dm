@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import re
 from dataclasses import dataclass, field
@@ -69,3 +70,11 @@ def merge_cli(cfg: Config, args: argparse.Namespace) -> Config:
     if getattr(args, "no_tray", None):
         cfg.no_tray = True
     return cfg
+
+
+def save(cfg: Config, path: Path | None = None) -> None:
+    """把当前配置写回 yaml(位置/尺寸等运行时留存)。"""
+    p = path or Path(os.path.expanduser("~/.config/bilidm-overlay/config.yaml"))
+    p.parent.mkdir(parents=True, exist_ok=True)
+    data = dataclasses.asdict(cfg)
+    p.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")

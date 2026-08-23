@@ -53,3 +53,17 @@ def test_merge_cli_per_room_flag_wins():
     args = argparse.Namespace(room=["bilibili:1", "bilibili:2"], merged=None, per_room=True,
                               socket=None, no_tray=None)
     assert merge_cli(cfg, args).mode == "per-room"
+
+
+def test_save_roundtrip(tmp_path):
+    from bilidm_overlay.config import save
+
+    cfg = Config()
+    cfg.width, cfg.height = 500, 360
+    cfg.position = [64, 128]
+    save(cfg, tmp_path / "c.yaml")
+    loaded = load(tmp_path / "c.yaml")
+    assert loaded.width == 500 and loaded.height == 360
+    assert loaded.position == [64, 128]
+    # 未变字段保持默认
+    assert loaded.ttl_seconds == 30.0

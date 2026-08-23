@@ -8,22 +8,26 @@ from kotonoha.platform import (
     DefaultOverlayPlatformFactory,
     LayerShellController,
     QtWindowHost,
+    WindowPoint,
     WindowPolicy,
     default_package_dir,
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QGuiApplication
+from kotonoha.platform.overlay_contracts import DragMode
+from PyQt6.QtCore import QPoint, Qt, QTimer
+from PyQt6.QtGui import QColor, QGuiApplication, QMouseEvent, QPainter
 from PyQt6.QtWidgets import (
     QApplication,
+    QHBoxLayout,
     QLabel,
     QMenu,
     QStyle,
     QSystemTrayIcon,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from .config import Config
+from .config import Config, save
 from .danmaku.lifecycle import Wall
 from .danmaku.model import Danmaku
 from .danmaku.wall import WallWidget
@@ -31,6 +35,9 @@ from .danmaku.wall import WallWidget
 logger = logging.getLogger(__name__)
 
 RENDER_INTERVAL_MS = 30
+MIN_W = 280
+MIN_H = 160
+RESIZE_GRAB_PX = 14  # 右下角缩放手柄边长
 
 
 class DanmakuWindow(QWidget):
@@ -65,6 +72,12 @@ class DanmakuWindow(QWidget):
             if not result.succeeded:
                 logger.debug("layer-shell activation skipped: %s", result.reason or "no reason given")
 
+        self._layer_pos = QPoint(cfg.position[0], cfg.position[1])
+        self._dragging = False
+        self._resizing = False
+        self._drag_local = QPoint()
+        self._resize_start: tuple[QPoint, QPoint] | None = None  # (按下点, 原尺寸)
+
         self._wall_widget = WallWidget(self)
         self._wall_widget.set_font(cfg.font_family, cfg.font_size)
         self._wall_widget.set_panel_opacity(cfg.opacity)
@@ -73,8 +86,11 @@ class DanmakuWindow(QWidget):
         self._status_label.setStyleSheet("color: #9AA0A6; font-size: 11px; padding-left: 6px;")
         self._status_label.setVisible(False)
 
+        self._control_bar = self._build_controls()
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
+        layout.addWidget(self._control_bar)
         layout.addWidget(self._wall_widget)
         layout.addWidget(self._status_label)
 
@@ -123,12 +139,123 @@ class DanmakuWindow(QWidget):
         # window stays click-through. Clear it now that the attribute is off.
         if not on:
             self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowTransparentForInput)
+        # 工具条只在可交互(非穿透)时可见,与 kotonoha 同语义
+        bar = getattr(self, "_control_bar", None)
+        if bar is not None:
+            bar.setVisible(not on)
 
     def show_window(self) -> None:
         self.show()
 
     def hide_window(self) -> None:
         self.hide()
+
+    # --- 鼠标交互:非穿透时拖动/右下角缩放手柄 ---
+    def mousePressEvent(self, a0: QMouseEvent | None) -> None:
+        if a0 is not None and not self._passthrough and a0.button() == Qt.MouseButton.LeftButton:
+            pos = a0.position().toPoint()
+            if self._in_resize_grab(pos):
+                self._resizing = True
+                self._resize_start = (pos, self.size())
+                a0.accept()
+                return
+            gp = a0.globalPosition().toPoint()
+            result = self._platform.begin_drag(
+                WindowPoint(pos.x(), pos.y()),
+                WindowPoint(gp.x(), gp.y()),
+            )
+            if result.mode is not DragMode.MANUAL:
+                super().mousePressEvent(a0)
+                return
+            self._dragging = True
+            self._drag_local = pos
+            a0.accept()
+            return
+        super().mousePressEvent(a0)
+
+    def mouseMoveEvent(self, a0: QMouseEvent | None) -> None:
+        if a0 is None:
+            super().mouseMoveEvent(a0)
+            return
+        if self._resizing and a0.buttons() & Qt.MouseButton.LeftButton:
+            pos = a0.position().toPoint()
+            start_pos, orig_size = self._resize_start
+            w = max(MIN_W, orig_size.width() + pos.x() - start_pos.x())
+            h = max(MIN_H, orig_size.height() + pos.y() - start_pos.y())
+            self.resize(w, h)
+            a0.accept()
+            return
+        if self._dragging and a0.buttons() & Qt.MouseButton.LeftButton:
+            local = a0.position().toPoint()
+            gp = a0.globalPosition().toPoint()
+            # 位置记忆:layer-shell 下合成器不接受客户端查询,用本地累计
+            self._layer_pos += local - self._drag_local
+            self._platform.update_drag(
+                WindowPoint(local.x(), local.y()),
+                WindowPoint(gp.x(), gp.y()),
+            )
+            a0.accept()
+            return
+        super().mouseMoveEvent(a0)
+
+    def mouseReleaseEvent(self, a0: QMouseEvent | None) -> None:
+        if self._resizing:
+            self._resizing = False
+            self._resize_start = None
+            self._save_geometry()
+            a0.accept()
+            return
+        if self._dragging:
+            self._dragging = False
+            self._platform.end_drag()
+            if self._platform.capabilities.client_positioning:
+                self._save_geometry()
+            a0.accept()
+            return
+        super().mouseReleaseEvent(a0)
+
+    def paintEvent(self, event) -> None:
+        """非穿透时右下角画缩放把手(QPainter 直接画,不建 child widget)。"""
+        super().paintEvent(event)
+        if self._passthrough:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor(160, 160, 170, 170)
+        painter.setPen(color)
+        w, h = self.width(), self.height()
+        for i in range(4):
+            x = w - 4 - i * 3
+            painter.drawLine(x, h - RESIZE_GRAB_PX, w - RESIZE_GRAB_PX, x)
+
+    def _in_resize_grab(self, pos: QPoint) -> bool:
+        return pos.x() >= self.width() - RESIZE_GRAB_PX and pos.y() >= self.height() - RESIZE_GRAB_PX
+
+    def _save_geometry(self) -> None:
+        self._cfg.position = [self._layer_pos.x(), self._layer_pos.y()]
+        self._cfg.width, self._cfg.height = self.width(), self.height()
+        save(self._cfg)
+
+    def _build_controls(self) -> QWidget:
+        bar = QWidget(self)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        lock = QToolButton(bar)
+        lock.setText("🔓")
+        lock.setCheckable(True)
+        lock.setChecked(not self._passthrough)
+        lock.setToolTip("锁定(关闭点击穿透)以支持拖拽/缩放")
+        lock.toggled.connect(lambda on: self.set_passthrough(not on))
+        settings = QToolButton(bar)
+        settings.setText("⚙")
+        settings.setToolTip("设置")
+        settings.clicked.connect(self._open_settings)
+        layout.addWidget(lock)
+        layout.addWidget(settings)
+        layout.addStretch(1)
+        bar.setVisible(not self._passthrough)
+        return bar
 
     # --- 内部 ---
     def _now(self) -> float:
