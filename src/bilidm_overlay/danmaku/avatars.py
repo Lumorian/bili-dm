@@ -9,7 +9,7 @@ from PyQt6.QtCore import QObject, QStandardPaths, QUrl, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
-AVATAR_SIDE = 20  # 行内头像边长(px)
+AVATAR_SIDE = 24  # 行内头像边长(px)
 
 
 def avatar_cache_path(url: str, cache_dir: str | None = None) -> str:

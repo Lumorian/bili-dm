@@ -4,22 +4,25 @@ from __future__ import annotations
 
 import logging
 
+from kotonoha.icons import lock_icon, settings_icon
 from kotonoha.platform import (
     DefaultOverlayPlatformFactory,
     LayerShellController,
     QtWindowHost,
     WindowPoint,
     WindowPolicy,
+    WindowRectangle,
     default_package_dir,
 )
 from kotonoha.platform.overlay_contracts import DragMode
-from PyQt6.QtCore import QPoint, Qt, QTimer
-from PyQt6.QtGui import QColor, QGuiApplication, QMouseEvent, QPainter
+from PyQt6.QtCore import QPoint, QSize, Qt, QTimer
+from PyQt6.QtGui import QGuiApplication, QMouseEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
     QMenu,
+    QSizePolicy,
     QStyle,
     QSystemTrayIcon,
     QToolButton,
@@ -31,7 +34,7 @@ from .config import Config, save
 from .danmaku.avatars import AvatarCache
 from .danmaku.lifecycle import Wall
 from .danmaku.model import Danmaku
-from .danmaku.wall import WallWidget
+from .danmaku.wall import PANEL_BG, PANEL_RADIUS, WallWidget
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,20 @@ RENDER_INTERVAL_MS = 30
 MIN_W = 280
 MIN_H = 160
 RESIZE_GRAB_PX = 14  # 右下角缩放手柄边长
+
+# 右上角控制按钮:kotonoha 同款圆形玻璃态(22×22、11px 圆角)
+CONTROL_ICON_COLOR = "#9AA0A6"
+CONTROL_BUTTON_STYLE = """
+QToolButton {
+    background: rgba(255, 255, 255, 28);
+    color: rgba(255, 255, 255, 210);
+    border: none;
+    border-radius: 11px;
+    font-size: 13px;
+}
+QToolButton:hover { background: rgba(255, 255, 255, 60); }
+QToolButton:pressed { background: rgba(255, 255, 255, 90); }
+"""
 
 
 class DanmakuWindow(QWidget):
@@ -63,7 +80,8 @@ class DanmakuWindow(QWidget):
         self._host = QtWindowHost(self)
         self._platform = DefaultOverlayPlatformFactory(controller)(self._host)
         self._platform.prepare()
-        self.set_passthrough(self._passthrough)
+        # 控制栏先建好,set_passthrough 才能同步锁按钮的图标/可见性
+        self._control_bar = self._build_controls()
         # make_overlay 把窗口提升为 layer-shell 表面:不调用时在 niri/KWin 上只是普通
         # 顶层窗,会被聚焦窗口盖住,失去"悬浮在弹幕内容之上"的意义。kotonoha 自身在首
         # 次 show() 前调用 activate()。offscreen 下即便通用适配器是 no-op 也会在后续
@@ -72,6 +90,8 @@ class DanmakuWindow(QWidget):
             result = self._platform.activate()
             if not result.succeeded:
                 logger.debug("layer-shell activation skipped: %s", result.reason or "no reason given")
+        # 表面(层壳角色)就绪后再设穿透:经输入区域切换,而不是重建表面
+        self.set_passthrough(self._passthrough)
 
         self._layer_pos = QPoint(cfg.position[0], cfg.position[1])
         self._dragging = False
@@ -81,7 +101,6 @@ class DanmakuWindow(QWidget):
 
         self._wall_widget = WallWidget(self)
         self._wall_widget.set_font(cfg.font_family, cfg.font_size)
-        self._wall_widget.set_panel_opacity(cfg.opacity)
         self._wall_widget.set_show_tag(show_tag)
         self._avatars = AvatarCache(self)
         self._avatars.loaded.connect(self._on_avatars_loaded)
@@ -90,13 +109,21 @@ class DanmakuWindow(QWidget):
         self._status_label.setStyleSheet("color: #9AA0A6; font-size: 11px; padding-left: 6px;")
         self._status_label.setVisible(False)
 
-        self._control_bar = self._build_controls()
+        # 按钮带 + 弹幕墙包进同一容器(间距 0):带底色与卡片一致,按钮落在卡片内部
+        # 右上角,随卡片高度变化整体移动——kotonoha 同款"控制条在卡片内"结构。
+        self._container = QWidget(self)
+        card_layout = QVBoxLayout(self._container)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+        card_layout.addWidget(self._control_bar)
+        card_layout.addWidget(self._wall_widget)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
-        layout.addWidget(self._control_bar)
-        layout.addWidget(self._wall_widget)
+        layout.addWidget(self._container)
         layout.addWidget(self._status_label)
+        # 卡片背景(圆角半透明)由容器 QSS 统一绘制,子控件保持透明
+        self._apply_card_background(self._cfg.opacity)
 
         self._tray: QSystemTrayIcon | None = None
         if not cfg.no_tray:
@@ -127,26 +154,44 @@ class DanmakuWindow(QWidget):
         self._status_label.setText(text)
 
     def set_passthrough(self, on: bool) -> None:
+        """锁定=除按钮带外全窗口点击穿透;解锁=窗口全区域可交互(拖动/缩放)。
+
+        切换经 layer-shell 输入区域(而非重建表面):setWindowFlags 会销毁原生
+        wl_surface,重建的新表面未经过 make_overlay(),失去 layer-shell 角色后
+        窗口从屏幕上消失——kotonoha 同款 set_input_region 语义。锁定态保留按钮带
+        可点击,锁/设置按钮始终可达,解锁不依赖托盘。
+        """
         self._passthrough = on
-        self._host.apply_window_policy(
-            WindowPolicy(
-                transparent_for_input=on,
-                mouse_events_transparent=on,
-                does_not_accept_focus=True,
-                recreate_surface=True,
+        result = self._platform.set_input_region(self._input_region())
+        if not result.succeeded:
+            # 无层壳输入区域能力时退回 Qt 属性级穿透(不重建表面)
+            self._host.apply_window_policy(
+                WindowPolicy(
+                    transparent_for_input=on,
+                    mouse_events_transparent=on,
+                    does_not_accept_focus=True,
+                    recreate_surface=False,
+                )
             )
-        )
-        # Qt keeps the WindowTransparentForInput window flag in sync with the
-        # WA_TransparentForMouseEvents attribute. apply_window_policy sets the
-        # flags while the attribute is still on (it is cleared afterwards), so
-        # turning passthrough off leaves the input-transparency bit set and the
-        # window stays click-through. Clear it now that the attribute is off.
-        if not on:
-            self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowTransparentForInput)
-        # 工具条只在可交互(非穿透)时可见,与 kotonoha 同语义
-        bar = getattr(self, "_control_bar", None)
-        if bar is not None:
-            bar.setVisible(not on)
+        self._update_lock_icon()
+
+    def _input_region(self) -> WindowRectangle | None:
+        """当前穿透态对应的输入区域(窗口坐标系):
+        锁定=仅按钮带矩形可点,其余点击穿透;解锁=整个窗口。"""
+        if self._passthrough:
+            top_left = self._control_bar.mapTo(self, QPoint(0, 0))
+            return WindowRectangle(
+                top_left.x(),
+                top_left.y(),
+                self._control_bar.width(),
+                self._control_bar.height(),
+            )
+        return WindowRectangle(0, 0, self.width(), self.height())
+
+    def resizeEvent(self, event) -> None:
+        """输入区域是固定矩形,需跟随窗口/按钮带几何变化刷新。"""
+        super().resizeEvent(event)
+        self._platform.set_input_region(self._input_region())
 
     def show_window(self) -> None:
         self.show()
@@ -218,21 +263,8 @@ class DanmakuWindow(QWidget):
             return
         super().mouseReleaseEvent(a0)
 
-    def paintEvent(self, event) -> None:
-        """非穿透时右下角画缩放把手(QPainter 直接画,不建 child widget)。"""
-        super().paintEvent(event)
-        if self._passthrough:
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        color = QColor(160, 160, 170, 170)
-        painter.setPen(color)
-        w, h = self.width(), self.height()
-        for i in range(4):
-            x = w - 4 - i * 3
-            painter.drawLine(x, h - RESIZE_GRAB_PX, w - RESIZE_GRAB_PX, x)
-
     def _in_resize_grab(self, pos: QPoint) -> bool:
+        """右下角缩放手柄命中区(无可见手柄,拖拽手感与原来一致)。"""
         return pos.x() >= self.width() - RESIZE_GRAB_PX and pos.y() >= self.height() - RESIZE_GRAB_PX
 
     def _save_geometry(self) -> None:
@@ -241,25 +273,62 @@ class DanmakuWindow(QWidget):
         save(self._cfg)
 
     def _build_controls(self) -> QWidget:
+        """右上角按钮带:[🔒 锁][⚙ 设置],与卡片一体;kotonoha 同款圆形玻璃按钮。
+
+        锁=点击穿透开关;按钮带在锁定态也保持可见/可点(set_passthrough 的输入区域
+        只放行按钮带矩形),解锁与设置永远可以从窗口直达,不依赖托盘。解锁后左键
+        拖动移动、右下角缩放手柄均可用(见 mousePressEvent 等)。
+        """
         bar = QWidget(self)
+        # 垂直方向固定为内容高:默认 Preferred 会随卡片一起拉伸,带子被对半分
+        # (实测 196px),按钮因此悬浮在卡片中部——kotonoha 的按钮必须贴在卡片顶。
+        bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        lock = QToolButton(bar)
-        lock.setText("🔓")
-        lock.setCheckable(True)
-        lock.setChecked(not self._passthrough)
-        lock.setToolTip("锁定(关闭点击穿透)以支持拖拽/缩放")
-        lock.toggled.connect(lambda on: self.set_passthrough(not on))
-        settings = QToolButton(bar)
-        settings.setText("⚙")
-        settings.setToolTip("设置")
-        settings.clicked.connect(self._open_settings)
-        layout.addWidget(lock)
-        layout.addWidget(settings)
-        layout.addStretch(1)
-        bar.setVisible(not self._passthrough)
+        layout.setContentsMargins(0, 6, 10, 0)  # 上 6px、右 10px 留白,按钮不贴卡片顶/右缘
+        layout.setSpacing(6)
+        layout.addStretch(1)  # 先前置 stretch,按钮组整体贴右缘(右上角)
+
+        self._lock_btn = self._make_control_button(bar)
+        self._lock_btn.clicked.connect(lambda: self.set_passthrough(not self._passthrough))
+
+        self._settings_btn = self._make_control_button(bar)
+        self._settings_btn.setIcon(settings_icon(CONTROL_ICON_COLOR))
+        self._settings_btn.setToolTip("设置")
+        self._settings_btn.clicked.connect(self._open_settings)
+
+        layout.addWidget(self._lock_btn)
+        layout.addWidget(self._settings_btn)
+        # 按钮带不画背景:卡片暗底由容器统一绘制(QSS),与弹幕卡片连成一块
+        self._update_lock_icon()
         return bar
+
+    def _apply_card_background(self, opacity: float) -> None:
+        """给卡片容器填上圆角半透明深色背景(QSS 绘制,子控件保持透明)。
+
+        QSS 无选择器声明只作用于容器自身;窗口已设 WA_TranslucentBackground,
+        四角默认透明,视觉上就是圆角卡片。圆角值与 niri layer-rule 的
+        geometry-corner-radius 保持同步(见 danmaku/wall.py PANEL_RADIUS)。
+        """
+        self._container.setStyleSheet(
+            f"background: rgba({PANEL_BG[0]}, {PANEL_BG[1]}, {PANEL_BG[2]}, {opacity});"
+            f" border-radius: {PANEL_RADIUS}px;"
+        )
+
+    def _make_control_button(self, parent: QWidget) -> QToolButton:
+        button = QToolButton(parent)
+        button.setFixedSize(22, 22)
+        button.setIconSize(QSize(15, 15))
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setStyleSheet(CONTROL_BUTTON_STYLE)
+        return button
+
+    def _update_lock_icon(self) -> None:
+        """按 passthrough 状态刷新锁按钮:锁定=闭锁图标+「已锁定」,解锁=开锁+「已解锁」。"""
+        lock = getattr(self, "_lock_btn", None)
+        if lock is None:
+            return
+        lock.setIcon(lock_icon(self._passthrough, CONTROL_ICON_COLOR))
+        lock.setToolTip("已锁定" if self._passthrough else "已解锁")
 
     # --- 内部 ---
     def _now(self) -> float:
@@ -309,7 +378,7 @@ class DanmakuWindow(QWidget):
                 self._cfg.mode,
             ) = (size, opacity, rows, ttl, width, height, mode)
             self._wall_widget.set_font(self._cfg.font_family, size)
-            self._wall_widget.set_panel_opacity(opacity)
+            self._apply_card_background(opacity)
             # 行数上限/TTL 变更即时生效;行数变更清空重来(与 v1 约定一致)
             self._wall = Wall(max_rows=rows, ttl=ttl)
             self.resize(width, height)

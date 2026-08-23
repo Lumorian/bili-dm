@@ -12,6 +12,10 @@ from .style import style_for
 
 AVATAR_GAP = 6          # 头像与文字间距
 TEXT_X = 6 + AVATAR_SIDE + AVATAR_GAP
+# 卡片底色(RGB):控制带(window._apply_card_background)与面板共用,改色只改这一处
+PANEL_BG = (16, 16, 20)
+# 卡片圆角(px):与 niri layer-rule 的 geometry-corner-radius 同步(全局 window-rule 同为 12)
+PANEL_RADIUS = 12
 
 
 class WallWidget(QWidget):
@@ -39,14 +43,6 @@ class WallWidget(QWidget):
         self._show_tag = show
         self.update()
 
-    def set_panel_opacity(self, opacity: float) -> None:
-        self.setAutoFillBackground(True)
-        pal = self.palette()
-        bg = QColor(16, 16, 20)
-        bg.setAlphaF(opacity)
-        pal.setColor(self.backgroundRole(), bg)
-        self.setPalette(pal)
-
     def update_wall(self, wall: Wall, now: float) -> None:
         self._wall = wall
         self._now = now
@@ -67,6 +63,10 @@ class WallWidget(QWidget):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        # 卡片背景由容器(QSS)绘制;面板自身内容裁剪进圆角,避免头像/文字溢出四角
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), PANEL_RADIUS, PANEL_RADIUS)
+        painter.setClipPath(path)
         # 自适应行数 + 自动滚底:只绘制面板能容纳的最新行
         rows = visible_window(self._wall.snapshot(), avail_height=float(self.height() - 12), line_height=float(self._line_height()))
         y = 6.0
