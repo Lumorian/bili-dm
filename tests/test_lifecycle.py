@@ -39,3 +39,36 @@ def test_alpha_fade_curve():
     assert wall.alpha_of(wall.snapshot()[0], now=45.0) == 0.5
     assert wall.alpha_of(wall.snapshot()[0], now=60.0) == 0.0
     assert wall.alpha_of(wall.snapshot()[0], now=90.0) == 0.0
+
+
+def test_visible_window_takes_latest_rows():
+    from bilidm_overlay.danmaku.lifecycle import visible_window
+
+    wall = Wall(max_rows=50, ttl=30)
+    for i in range(10):
+        wall.add(msg(str(i)), now=float(i))
+    vis = visible_window(wall.snapshot(), avail_height=100, line_height=20)
+    assert len(vis) == 5
+    assert vis[-1].msg.content == "9"  # 自动滚底:最新一条必在
+    assert vis[0].msg.content == "5"
+
+
+def test_visible_window_empty_and_insufficient():
+    from bilidm_overlay.danmaku.lifecycle import visible_window
+
+    assert visible_window([], avail_height=100, line_height=20) == []
+    wall = Wall()
+    wall.add(msg("x"), now=0.0)
+    vis = visible_window(wall.snapshot(), avail_height=100, line_height=20)
+    assert len(vis) == 1
+
+
+def test_visible_window_line_height_bigger_than_panel():
+    from bilidm_overlay.danmaku.lifecycle import visible_window
+
+    wall = Wall()
+    for i in range(3):
+        wall.add(msg(str(i)), now=float(i))
+    vis = visible_window(wall.snapshot(), avail_height=10, line_height=20)
+    assert len(vis) == 1
+    assert vis[0].msg.content == "2"

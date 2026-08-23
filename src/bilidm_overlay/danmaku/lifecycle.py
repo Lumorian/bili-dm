@@ -43,3 +43,15 @@ class Wall:
         if age <= half:
             return 1.0
         return 1.0 - (age - half) / half
+
+
+def visible_window(rows: list[Row], avail_height: float, line_height: float) -> list[Row]:
+    """返回面板可容纳的最新行(自动滚底:从末尾回溯,最新一条始终可见)。
+
+    纯逻辑,行高由调用方(widget 字体度量)提供。avail_height 或 line_height
+    非正时退化为只返回最新一行。
+    """
+    if not rows:
+        return []
+    n = max(1, int(avail_height // line_height)) if avail_height > 0 and line_height > 0 else 1
+    return rows[-n:]

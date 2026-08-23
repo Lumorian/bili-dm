@@ -24,8 +24,9 @@ class Config:
     rooms: list[str] = field(default_factory=list)
     position: list[int] = field(default_factory=lambda: [24, 100])
     width: int = 420
-    max_rows: int = 30
-    ttl_seconds: float = 60.0
+    height: int = 400
+    max_rows: int = 80
+    ttl_seconds: float = 30.0
     font_family: str = "Noto Sans CJK SC"
     font_size: int = 13
     opacity: float = 0.85

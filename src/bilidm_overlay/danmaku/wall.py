@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QColor, QFont, QPainter
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PyQt6.QtWidgets import QWidget
 
-from .lifecycle import Row, Wall
+from .lifecycle import Row, Wall, visible_window
 from .style import style_for
 
 
@@ -45,13 +45,20 @@ class WallWidget(QWidget):
     def row_count(self) -> int:
         return len(self._wall.snapshot()) if self._wall else 0
 
+    def _line_height(self) -> int:
+        """基础字号的一行高度(含 4px 行距),供可见窗口计算。"""
+        font = QFont(self._font)
+        font.setPixelSize(self._size)
+        return QFontMetrics(font).height() + 4
+
     def paintEvent(self, event) -> None:
         del event
         if self._wall is None:
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        rows = self._wall.snapshot()
+        # 自适应行数 + 自动滚底:只绘制面板能容纳的最新行
+        rows = visible_window(self._wall.snapshot(), avail_height=float(self.height() - 12), line_height=float(self._line_height()))
         y = 6.0
         for row in rows:
             alpha = self._wall.alpha_of(row, self._now)

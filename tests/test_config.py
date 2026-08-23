@@ -11,8 +11,8 @@ def test_default_socket_uses_runtime_dir(tmp_path, monkeypatch):
 def test_defaults():
     cfg = Config()
     assert cfg.mode == "merged"
-    assert cfg.max_rows == 30
-    assert cfg.ttl_seconds == 60.0
+    assert cfg.max_rows == 80
+    assert cfg.ttl_seconds == 30.0
     assert cfg.click_through is True
     assert cfg.opacity == 0.85
     assert cfg.position == [24, 100]
@@ -25,9 +25,10 @@ def test_load_expands_env_and_yaml(tmp_path, monkeypatch):
     cfg = load(f)
     assert cfg.socket == f"{tmp_path}/test.sock"
     assert cfg.width == 600
+    assert cfg.height == 400
     assert cfg.rooms == ["bilibili:689422"]
     # 未写的字段保持默认
-    assert cfg.ttl_seconds == 60.0
+    assert cfg.ttl_seconds == 30.0
 
 
 def test_load_missing_file_is_defaults(tmp_path):

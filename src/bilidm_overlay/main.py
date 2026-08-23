@@ -136,7 +136,7 @@ def entry_point() -> None:
 
     loop.create_task(_run())
     for w in windows:
-        w.resize(cfg.width, 400)
+        w.resize(cfg.width, cfg.height)
         w.move(cfg.position[0], cfg.position[1])  # X11 回退下生效;layer-shell 下被合成器重定位,精确锚点属后续微调
         w.show()
     try:
