@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .config import Config, save
+from .danmaku.avatars import AvatarCache
 from .danmaku.lifecycle import Wall
 from .danmaku.model import Danmaku
 from .danmaku.wall import WallWidget
@@ -82,6 +83,9 @@ class DanmakuWindow(QWidget):
         self._wall_widget.set_font(cfg.font_family, cfg.font_size)
         self._wall_widget.set_panel_opacity(cfg.opacity)
         self._wall_widget.set_show_tag(show_tag)
+        self._avatars = AvatarCache(self)
+        self._avatars.loaded.connect(self._on_avatars_loaded)
+        self._wall_widget.set_avatars(self._avatars)
         self._status_label = QLabel("", self)
         self._status_label.setStyleSheet("color: #9AA0A6; font-size: 11px; padding-left: 6px;")
         self._status_label.setVisible(False)
@@ -268,6 +272,10 @@ class DanmakuWindow(QWidget):
         self._wall_widget.update_wall(self._wall, self._now())
         if self._cfg.hide_when_idle_seconds and self.row_count() == 0:
             self.hide_window()
+
+    def _on_avatars_loaded(self) -> None:
+        """某头像下载完成:重绘面板。"""
+        self._wall_widget.update()
 
     def _setup_tray(self) -> None:
         icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DesktopIcon)

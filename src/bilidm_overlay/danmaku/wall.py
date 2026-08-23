@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
 from PyQt6.QtWidgets import QWidget
 
+from .avatars import AVATAR_SIDE, AvatarCache
 from .lifecycle import Row, Wall, visible_window
 from .style import style_for
+
+AVATAR_GAP = 6          # 头像与文字间距
+TEXT_X = 6 + AVATAR_SIDE + AVATAR_GAP
 
 
 class WallWidget(QWidget):
@@ -18,6 +22,12 @@ class WallWidget(QWidget):
         self._wall: Wall | None = None
         self._now = 0.0
         self._show_tag = False
+        self._avatars: AvatarCache | None = None
+
+    def set_avatars(self, cache: AvatarCache | None) -> None:
+        """挂载头像缓存:pixmap() 未命中会触发异步下载,loaded 后窗口触发 update。"""
+        self._avatars = cache
+        self.update()
 
     def set_font(self, family: str, size: int) -> None:
         self._size = size
@@ -46,10 +56,10 @@ class WallWidget(QWidget):
         return len(self._wall.snapshot()) if self._wall else 0
 
     def _line_height(self) -> int:
-        """基础字号的一行高度(含 4px 行距),供可见窗口计算。"""
+        """一行高度(含 4px 行距,且不小于头像边长)。"""
         font = QFont(self._font)
         font.setPixelSize(self._size)
-        return QFontMetrics(font).height() + 4
+        return max(QFontMetrics(font).height(), AVATAR_SIDE) + 4
 
     def paintEvent(self, event) -> None:
         del event
@@ -73,6 +83,7 @@ class WallWidget(QWidget):
         font.setPixelSize(int(self._size * spec.size_scale))
         painter.setFont(font)
         fm = painter.fontMetrics()
+        self._draw_avatar(painter, row.msg, y, alpha)
         tag = ""
         if self._show_tag and row.msg.platform and row.msg.rid:
             tag = f"{row.msg.platform}/{row.msg.rid} "
@@ -81,7 +92,37 @@ class WallWidget(QWidget):
         color = QColor(spec.name_color)
         color.setAlphaF(alpha)
         painter.setPen(color)
-        if fm.horizontalAdvance(text) > self.width() - 12:
-            text = fm.elidedText(text, Qt.TextElideMode.ElideRight, self.width() - 12)
-        painter.drawText(QRectF(6, y, self.width() - 12, fm.height()), Qt.AlignmentFlag.AlignVCenter, text)
-        return y + fm.height()
+        text_width = self.width() - TEXT_X - 6
+        if fm.horizontalAdvance(text) > text_width:
+            text = fm.elidedText(text, Qt.TextElideMode.ElideRight, text_width)
+        painter.drawText(
+            QRectF(TEXT_X, y, text_width, fm.height()),
+            Qt.AlignmentFlag.AlignVCenter,
+            text,
+        )
+        return y + max(fm.height(), AVATAR_SIDE)
+
+    def _draw_avatar(self, painter: QPainter, msg, y: float, alpha: float) -> None:
+        rect = QRectF(6.0, y, AVATAR_SIDE, AVATAR_SIDE)
+        pix = self._avatars.pixmap(msg.avatar) if self._avatars is not None else None
+        if pix is not None:
+            scaled = pix.scaled(AVATAR_SIDE, AVATAR_SIDE, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                Qt.TransformationMode.SmoothTransformation)
+            path = QPainterPath()
+            path.addEllipse(rect)
+            painter.save()
+            painter.setClipPath(path)
+            painter.drawPixmap(rect.toRect(), scaled)
+            painter.restore()
+            return
+        # 占位:灰圆 + 名字首字
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(72, 72, 80, int(200 * alpha)))
+        painter.drawEllipse(rect)
+        first = (msg.name or "").strip()[:1]
+        if first:
+            font = QFont(self._font)
+            font.setPixelSize(int(self._size * 0.65))
+            painter.setFont(font)
+            painter.setPen(QColor(220, 220, 225, int(255 * alpha)))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, first)
