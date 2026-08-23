@@ -290,9 +290,19 @@ class DanmakuWindow(QWidget):
 
         dialog = SettingsDialog(self, self._cfg)
         if dialog.exec():
-            size, opacity, rows = dialog.values()
-            self._cfg.font_size, self._cfg.opacity, self._cfg.max_rows = size, opacity, rows
+            (size, opacity, rows, ttl, width, height, mode) = dialog.values()
+            (
+                self._cfg.font_size,
+                self._cfg.opacity,
+                self._cfg.max_rows,
+                self._cfg.ttl_seconds,
+                self._cfg.width,
+                self._cfg.height,
+                self._cfg.mode,
+            ) = (size, opacity, rows, ttl, width, height, mode)
             self._wall_widget.set_font(self._cfg.font_family, size)
             self._wall_widget.set_panel_opacity(opacity)
-            # v1:行数上限即时生效,当前行清空重来;配置持久化到 yaml 属后续迭代
-            self._wall = Wall(max_rows=rows, ttl=self._cfg.ttl_seconds)
+            # 行数上限/TTL 变更即时生效;行数变更清空重来(与 v1 约定一致)
+            self._wall = Wall(max_rows=rows, ttl=ttl)
+            self.resize(width, height)
+            save(self._cfg)

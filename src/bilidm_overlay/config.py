@@ -11,6 +11,8 @@ from pathlib import Path
 
 import yaml
 
+from .api import default_api_address, default_api_token
+
 _ENV_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 
 
@@ -34,6 +36,9 @@ class Config:
     click_through: bool = True
     hide_when_idle_seconds: int = 0
     no_tray: bool = False
+    # UniBarrage 连接(房间管理对话框用;默认与 dmnotifier 的 server 段一致)
+    api_address: str = field(default_factory=default_api_address)
+    api_token: str = field(default_factory=default_api_token)
 
 
 def _expand(s: str) -> str:
