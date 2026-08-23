@@ -56,8 +56,11 @@ requires-python = ">=3.13"
 dependencies = [
     "PyQt6",
     "qasync",
-    "kotonoha = { path = \"../kotonoha\" }",
+    "kotonoha",
 ]
+
+[tool.uv.sources]
+kotonoha = { path = "../kotonoha" }
 
 [project.scripts]
 bilidm-overlay = "bilidm_overlay.main:entry_point"
@@ -959,7 +962,7 @@ def test_paints_rows_without_error():
     painter = QPainter(widget)
     widget.paintEvent(QPaintEvent(widget.rect()))
     painter.end()
-    assert True  # 不抛异常即通过
+    assert widget.row_count() == 3  # 三行均已入墙,绘制过程无异常
 
 
 def test_clear_rows():
@@ -1852,13 +1855,13 @@ func (c *Consumer) Consume(ctx context.Context, msg *models.Message) error {
 	return nil
 }
 
-// marshalLine 序列化为协议 JSON line(输出层加 \n)。
+// marshalLine 序列化为协议 JSON line(输出层加 \n;type 必须小写,与协议一致)。
 func marshalLine(m *models.Message) []byte {
 	w := map[string]any{
 		"time":     time.Now().Format(time.RFC3339),
 		"platform": m.Platform,
 		"rid":      m.RID,
-		"type":     string(m.Type),
+		"type":     strings.ToLower(string(m.Type)),
 	}
 	switch d := m.Data.(type) {
 	case *models.ChatData:
@@ -2011,7 +2014,15 @@ Create `overlay/scripts/start.sh`:
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DMNOTIFIER_BIN="${DMNOTIFIER_BIN:-dmnotifier}"
+# 优先用仓库内构建的 dmnotifier 二进制;否则找 PATH 里的
+DMNOTIFIER_BIN="${DMNOTIFIER_BIN:-}"
+if [[ -z "$DMNOTIFIER_BIN" ]]; then
+  if [[ -x "$ROOT/../dmnotifier/dmnotifier" ]]; then
+    DMNOTIFIER_BIN="$ROOT/../dmnotifier/dmnotifier"
+  else
+    DMNOTIFIER_BIN="$(command -v dmnotifier || echo dmnotifier)"
+  fi
+fi
 ROOM_ARGS=()
 
 while [[ $# -gt 0 ]]; do
