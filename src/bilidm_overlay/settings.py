@@ -83,9 +83,6 @@ class SettingsDialog(QDialog):
         self._rows = QSpinBox(self)
         self._rows.setRange(5, 200)
         self._rows.setValue(cfg.max_rows)
-        self._ttl = QSpinBox(self)
-        self._ttl.setRange(5, 300)
-        self._ttl.setValue(int(cfg.ttl_seconds))
         self._width = QSpinBox(self)
         self._width.setRange(280, 2000)
         self._width.setValue(cfg.width)
@@ -96,10 +93,14 @@ class SettingsDialog(QDialog):
         self._mode.addItems(["merged", "per-room"])
         if cfg.mode in ("merged", "per-room"):
             self._mode.setCurrentText(cfg.mode)
+        self._theme = QComboBox(self)
+        self._theme.addItems(["dark", "light"])
+        if getattr(cfg, "theme", "dark") in ("dark", "light"):
+            self._theme.setCurrentText(cfg.theme)
         form.addRow("字号", self._font)
+        form.addRow("主题", self._theme)
         form.addRow("透明度", self._opacity)
         form.addRow("墙行数上限", self._rows)
-        form.addRow("TTL(秒)", self._ttl)
         form.addRow("宽度", self._width)
         form.addRow("高度", self._height)
         form.addRow("窗口模式", self._mode)
@@ -154,14 +155,14 @@ class SettingsDialog(QDialog):
             self._note.setText(f"添加失败: {exc}")
 
     # --- 结果 ---
-    def values(self) -> tuple[int, float, int, float, int, int, str]:
-        """返回 (font_size, opacity, max_rows, ttl_seconds, width, height, mode)。"""
+    def values(self) -> tuple[int, float, int, int, int, str, str]:
+        """返回 (font_size, opacity, max_rows, width, height, mode, theme)。"""
         return (
             self._font.value(),
             self._opacity.value(),
             self._rows.value(),
-            float(self._ttl.value()),
             self._width.value(),
             self._height.value(),
             self._mode.currentText(),
+            self._theme.currentText(),
         )

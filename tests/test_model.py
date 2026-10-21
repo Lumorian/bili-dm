@@ -2,7 +2,7 @@ from datetime import datetime
 
 import pytest
 
-from bilidm_overlay.danmaku.model import Danmaku, parse_message
+from bilidm_overlay.danmaku.model import parse_message
 
 
 def test_parses_chat_line():
@@ -65,3 +65,52 @@ def test_parses_avatar_field():
 def test_missing_avatar_is_empty():
     d = parse_message('{"type":"chat","name":"A"}')
     assert d.avatar == ""
+
+
+def test_parses_medal_and_guard_fields():
+    line = (
+        '{"type":"chat","name":"A","content":"hi","platform":"bilibili",'
+        '"guard_level":3,"user_level":42,"name_color":"#00D1F1",'
+        '"medal":{"name":"酷萨","level":33,"color_start":"#638FFE",'
+        '"color_end":"#5B8AF5","color_border":"#638FFE","color_text":"#FFFFFF",'
+        '"guard_level":3}}'
+    )
+    d = parse_message(line)
+    assert d.guard_level == 3
+    assert d.user_level == 42
+    assert d.name_color == "#00D1F1"
+    assert d.medal is not None
+    assert d.medal.name == "酷萨"
+    assert d.medal.level == 33
+    assert d.medal.color_start == "#638FFE"
+    assert d.medal.guard_level == 3
+
+
+def test_unworn_medal_becomes_none():
+    d = parse_message('{"type":"chat","medal":{"name":"酷萨","level":0}}')
+    assert d.medal is None
+    d2 = parse_message('{"type":"chat","medal":{}}')
+    assert d2.medal is None
+
+
+def test_guard_level_falls_back_to_medal():
+    d = parse_message('{"type":"chat","medal":{"name":"酷萨","level":9,"guard_level":2}}')
+    assert d.guard_level == 2
+
+
+def test_numeric_fields_are_lenient():
+    d = parse_message('{"type":"chat","guard_level":"3","user_level":"17"}')
+    assert d.guard_level == 3
+    assert d.user_level == 17
+    bad = parse_message('{"type":"chat","guard_level":"x"}')
+    assert bad.guard_level == 0
+
+
+def test_parses_superchat_colors():
+    d = parse_message(
+        '{"type":"superchat","price":30,"bg_color_start":"#F2C55C",'
+        '"bg_color_end":"#E9A100","price_color":"#FFFFFF"}'
+    )
+    assert d.bg_color_start == "#F2C55C"
+    assert d.bg_color_end == "#E9A100"
+    assert d.price_color == "#FFFFFF"

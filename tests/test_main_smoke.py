@@ -29,10 +29,19 @@ def app():
 
 def _cfg(**kw):
     defaults = {
-        "socket": "/tmp/none.sock", "mode": "merged", "rooms": ["bilibili:689422"],
-        "width": 420, "max_rows": 30, "ttl_seconds": 60.0, "font_family": "monospace",
-        "font_size": 13, "opacity": 0.85, "position": [24, 100], "click_through": True,
-        "hide_when_idle_seconds": 0, "no_tray": True,
+        "socket": "/tmp/none.sock",
+        "mode": "merged",
+        "rooms": ["bilibili:689422"],
+        "width": 420,
+        "max_rows": 30,
+        "font_family": "monospace",
+        "font_size": 13,
+        "theme": "dark",
+        "opacity": 0.85,
+        "position": [24, 100],
+        "click_through": True,
+        "hide_when_idle_seconds": 0,
+        "no_tray": True,
     }
     defaults.update(kw)
     return type("Cfg", (), defaults)
@@ -108,7 +117,7 @@ def test_control_bar_band_merges_with_card(app):
 
     # 卡片底色/圆角由容器 QSS 统一绘制,bar 与 wall 不再各自画背景
     qss = win._container.styleSheet()
-    assert "rgba(16, 16, 20," in qss, "容器统一画卡片底色(PANEL_BG)"
+    assert "rgba(16, 16, 17," in qss, "容器统一画卡片底色(深色主题 --bg2 #101011)"
     assert "border-radius: 12px" in qss, "容器画圆角(与 niri layer-rule 同步 12px)"
     assert win._control_bar.autoFillBackground() is False
     assert win._wall_widget.autoFillBackground() is False
@@ -184,9 +193,9 @@ def test_locked_input_region_keeps_control_band_clickable(app, monkeypatch):
     win.set_passthrough(True)
     rect = regions[-1]
     assert rect is not None, "锁定不得全穿透:按钮带必须保留可点击"
-    assert (
-        rect.width == win._control_bar.width() and rect.height == win._control_bar.height()
-    ), "锁定态输入区域应覆盖整个按钮带(含锁/设置按钮)"
+    assert rect.width == win._control_bar.width() and rect.height == win._control_bar.height(), (
+        "锁定态输入区域应覆盖整个按钮带(含锁/设置按钮)"
+    )
 
 
 def test_per_room_filter_drops_other_rooms(app):
@@ -194,6 +203,39 @@ def test_per_room_filter_drops_other_rooms(app):
     win.feed(Danmaku(type="chat", platform="bilibili", rid="2", name="A", content="other"))
     win.feed(Danmaku(type="chat", platform="bilibili", rid="1", name="B", content="mine"))
     assert win.row_count() == 1
+
+
+def test_idle_hide_after_no_new_messages(app, monkeypatch):
+    """弹幕不再过期后,hide_when_idle 语义为"超过 N 秒没有新弹幕"才隐藏窗口。"""
+    import time
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+    win = DanmakuWindow(_cfg(hide_when_idle_seconds=10))
+    win.feed(Danmaku(type="chat", name="A", content="hi"))
+    assert win.isVisible()  # 有新弹幕:显示
+    clock["t"] = 1011.0
+    win._tick()
+    assert not win.isVisible()  # 10 秒无新弹幕:隐藏
+    win.feed(Danmaku(type="chat", name="B", content="yo"))
+    assert win.isVisible()  # 新弹幕:重新显示
+    clock["t"] = 1020.5
+    win._tick()
+    assert win.isVisible()  # 离上一条才 9.5 秒:不隐藏
+    clock["t"] = 1021.5
+    win._tick()
+    assert not win.isVisible()  # 超 10 秒:隐藏
+
+
+def test_idle_hide_disabled_by_default(app, monkeypatch):
+    """hide_when_idle_seconds=0(默认)时定时器不得隐藏窗口。"""
+    import time
+
+    monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
+    win = DanmakuWindow(_cfg())
+    win.feed(Danmaku(type="chat", name="A", content="hi"))
+    win._tick()
+    assert win.isVisible()  # 功能关闭:永不隐藏
 
 
 def test_demo_generator_yields_messages(app):
@@ -235,11 +277,11 @@ def test_second_instance_exits_when_socket_taken(tmp_path, monkeypatch, caplog):
 
         # entry_point 会二次构造 QApplication(套件里已存在)并注册真实信号 handler
         # (会污染 pytest 进程) —— 均在测试内打桩。
-        monkeypatch.setattr(main, "QApplication", lambda argv: QApplication.instance() or QApplication(argv))
-        monkeypatch.setattr(main, "load", lambda p: Config(socket=sock))
         monkeypatch.setattr(
-            qasync.QEventLoop, "add_signal_handler", lambda self, sig, cb: None
+            main, "QApplication", lambda argv: QApplication.instance() or QApplication(argv)
         )
+        monkeypatch.setattr(main, "load", lambda p: Config(socket=sock))
+        monkeypatch.setattr(qasync.QEventLoop, "add_signal_handler", lambda self, sig, cb: None)
         monkeypatch.setattr(sys, "argv", ["bilidm-overlay", "--socket", sock, "--no-tray"])
 
         with pytest.raises(SystemExit) as exc:
@@ -252,3 +294,31 @@ def test_second_instance_exits_when_socket_taken(tmp_path, monkeypatch, caplog):
             asyncio.run(first.stop())
         if os.path.exists(sock):
             os.unlink(sock)
+
+
+# --- 设置对话框:主题下拉与 values() 元组 ---
+
+
+def test_settings_values_include_theme(app):
+    from bilidm_overlay.config import Config
+    from bilidm_overlay.settings import SettingsDialog
+
+    dialog = SettingsDialog(None, Config())
+    values = dialog.values()
+    assert len(values) == 7
+    assert values[-1] == "dark"  # 默认深色
+    dialog._theme.setCurrentText("light")
+    assert dialog.values()[-1] == "light"
+    dialog.close()
+
+
+def test_settings_max_rows_default_comes_from_config(app):
+    from bilidm_overlay.config import Config
+    from bilidm_overlay.settings import SettingsDialog
+
+    cfg = Config()
+    cfg.theme = "light"
+    dialog = SettingsDialog(None, cfg)
+    assert dialog.values()[-1] == "light"
+    dialog.close()
+

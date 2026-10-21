@@ -29,10 +29,10 @@ class Config:
     width: int = 420
     height: int = 400
     max_rows: int = 80
-    ttl_seconds: float = 30.0
     font_family: str = "Noto Sans CJK SC"
-    font_size: int = 13
+    font_size: int = 12  # 官方聊天列表基准字号 12px
     opacity: float = 0.85
+    theme: str = "dark"  # dark | light:官方 bili-theme 的 --bg2/--text2 两套令牌
     click_through: bool = True
     hide_when_idle_seconds: int = 0
     no_tray: bool = False
@@ -74,6 +74,8 @@ def merge_cli(cfg: Config, args: argparse.Namespace) -> Config:
         cfg.mode = "merged"
     if getattr(args, "no_tray", None):
         cfg.no_tray = True
+    if getattr(args, "theme", None):
+        cfg.theme = args.theme
     return cfg
 
 

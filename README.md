@@ -1,19 +1,66 @@
 # Bilidm Overlay
 
-漂浮在 B 站直播间上方的弹幕悬浮窗(Wayland):以半透明点击穿透窗口滚动展示真实弹幕,聊天、礼物、SC、订阅四种类型各有样式,按年龄淡出。
+漂浮在 B 站直播间上方的弹幕悬浮窗(Wayland):以半透明点击穿透窗口滚动展示真实弹幕,聊天、礼物、SC、订阅四种类型各有样式,弹幕保留至被新弹幕顶替。
 
 数据链路:`UniBarrage` → `dmnotifier`(float 插件)→ Unix socket → `bilidm-overlay`(PyQt6/QtWayland layer-shell)。
 
 ## 功能
 
-- 悬浮滚动墙:Chat/礼物/SC/订阅分别着色与加粗/描边;**行数按面板高度自适应,新消息自动滚到底部**,TTL 默认 30s 淡出(可配置)
+- 悬浮滚动墙:Chat/礼物/SC/订阅分别着色与加粗/描边;**行数按面板高度自适应,新消息自动滚到底部**;无时间淡出——弹幕一直保留,直到新弹幕顶替旧行(墙内按行数上限计数淘汰)
 - **房间管理在窗口内**:卡片右上角内嵌按钮带(🔒 锁 / ⚙ 设置,与卡片一体)或托盘「设置…」打开;对话框列出 UniBarrage 当前服务,可添加(平台+rid+可选 cookie)与删除,保存后 dmnotifier run 每 5s 自动对齐订阅,无需重启
-- **窗口交互**:解锁(右上角锁按钮)后左键拖动移动、右下角拖拽缩放(无可见手柄),位置/尺寸写入 `~/.config/bilidm-overlay/config.yaml` 下次启动恢复;锁按钮随状态切换闭锁/开锁图标——**锁定态除按钮带外全窗口点击穿透**(不挡鼠标,按钮带始终可点,解锁/设置无需托盘),解锁即可直接调整,无需进设置
+- **窗口交互**:解锁(右上角锁按钮)后**窗口任意位置**左键拖动移动、右下角拖拽缩放(无可见手柄),位置/尺寸写入 `~/.config/bilidm-overlay/config.yaml` 下次启动恢复;锁按钮随状态切换闭锁/开锁图标——**锁定态除按钮带外全窗口点击穿透**(不挡鼠标,按钮带始终可点,解锁/设置无需托盘),解锁即可直接调整,无需进设置
 - **圆角卡片**:面板 12px 圆角(客户端绘制;niri 侧 `layer-rule` 的 `geometry-corner-radius` 同步,阴影/模糊随形)
-- **行首 24px 圆形头像**:异步加载 + 磁盘缓存(`~/.cache/bilidm-overlay/avatars/`),未就绪时灰色圆形占位(名字首字)
+- **排版 1:1 对齐官方弹幕面板**:行内顺序与度量照抄 B 站直播间 `chat-history-panel`
+  (`.chat-item{padding:5px}` + 20px 行框 = 30px 行高、`.chat-history-list{padding:5px 10px}`、
+  昵称后 `" : "`);粉丝勋章按 `medal.vue` 画成 15px 高、8px 圆角的渐变胶囊(含舰长锚图标、
+  等级槽位),礼物行 `昵称 赠送 礼物名 x20` 统一 `--pay_yellow`,上舰 `昵称 开通了 舰长`,
+  醒目留言为整块卡片(渐变底 + 金额)。逐项参数与量测过程见
+  `docs/superpowers/specs/2026-10-21-chat-panel-parity-design.md`
+- **行首 24px 圆形头像**:官方行内没有头像,本项目保留在最左(唯一有意偏离);异步加载 +
+  磁盘缓存(`~/.cache/bilidm-overlay/avatars/`),未就绪时灰色圆形占位(名字首字)
+- **深/浅两套官方配色**:`theme: dark`(默认,`--bg2:#101011`)/ `light`(`#F6F7F8`),
+  令牌取自官方 bili-theme;CLI `--theme`、设置对话框、`config.yaml` 均可切换
 - 全窗口点击穿透(默认开;托盘菜单可切),不挡鼠标点选下层窗口(穿透与设置项经托盘菜单验证,未做物理点击注入测试)
 - dmnotifier 断线自动重连(重连期间窗口显示"离线,连接中…")
 - 无头演示:`uv run bilidm-overlay --demo`
+
+## 排错:窗口拖不动 / 不穿透 / 停在左上角
+
+**症状**:悬浮窗出现在屏幕左上角,鼠标拖不动它,点击也穿不过去(反过来它挡住下层窗口)。
+
+**原因**:layer-shell 桥(`libkoto-layer.so`)依赖系统的 `layer-shell-qt`,而它跟着**系统**
+Qt 编译;PyQt6 的 wheel 则固定自带一版 Qt。两者一大版本错开时,桥一 `dlopen` 就报
+
+```
+version `Qt_6.12' not found (required by /usr/lib/libLayerShellQtInterface.so.6)
+```
+
+于是 kotonoha 判定"本会话没有 layer-shell",适配器退化成**普通顶层窗**:Wayland 上
+这种窗口既不能被客户端定位(所以 `move()` 无效、拖不动、位置记不住),也不能自绘
+输入区域(所以穿透也失效)。2026-10 的 `qt6-base` 6.11→6.12 升级配 `layer-shell-qt`
+6.8.0 正是这一情形。
+
+**处理**:取一份与 venv 里 Qt 同 ABI 的 `layer-shell-qt`,由 overlay 在加载桥之前预载
+(纯用户态,不装系统包、不需要 root):
+
+```bash
+overlay/scripts/fetch-layer-shell-qt.sh            # 下载到 ~/.cache/bilidm-overlay/layer-shell-qt/
+```
+
+`scripts/start.sh` 也会先跑一次 `fetch-layer-shell-qt.sh --ensure`,缺就补上。
+
+**确认结果**:启动日志里出现
+
+```
+INFO bilidm_overlay.layershell_qt_compat: 已预载 ABI 兼容的 layer-shell-qt:...libLayerShellQtInterface.so.6.7.5
+```
+
+`niri msg layers` 里能看到 `{"namespace":"kotonoha",...,"layer":"Overlay"}`(而不是
+`niri msg windows` 里多出一个 `Bilidm Overlay` 平铺窗)。若只有警告
+"layer-shell 桥无法加载",说明取回失败,按提示重跑脚本。
+
+> 换了 PyQt6 版本(venv 里的 Qt 变了)之后要重跑一次脚本:对照表在
+> `fetch-layer-shell-qt.sh` 里(6.11 → layer-shell-qt 6.7.5-1,6.12 → 6.8.0-1)。
 
 ## 依赖(Arch)
 
@@ -54,7 +101,7 @@ scripts/stop.sh --room bilibili:689422
 >
 > `dmnotifier start/stop/list` 仅管理 UniBarrage 远端监听;`dmnotifier run` 才是无头管道进程本身(消息推进由 float 插件完成,见 dmnotifier 配置 `~/.config/dmnotifier/config.yaml`;想用 TUI 人工管理也可以,等效)。
 
-> 已知限制:悬浮窗目前渲染在屏幕**左上角**——Wayland layer-shell 的锚点定在 Top|Left(kotonoha 桥接层如此生成)。规格里的左下角定位需要 kotonoha 桥接层支持底部锚点,属于跨仓库变更,已列入待办追踪;当前版本用户看到的是左上角悬浮窗。
+> 定位:锚点是 Top|Left(kotonoha 桥接层如此生成),位置由 `config.yaml` 的 `position` 决定并随拖动更新。wayland 上 `move()` 无效,启动时经桥的锚点设定——**前提是 layer-shell 真的可用**(见上面的排错一节);退化到普通顶层窗时合成器接管位置,拖动与位置记忆都不可用。
 
 ## niri keybind 示例
 
@@ -66,7 +113,7 @@ binds = { Mod+G = spawn "bash" "-c" "/home/lumorian/Projects/bili-dm/overlay/scr
 
 ## 配置
 
-- `~/.config/bilidm-overlay/config.yaml` — 悬浮窗宽度/位置/字号/透明度/行数/TTL/点击穿透(缺省即内置默认)
+- `~/.config/bilidm-overlay/config.yaml` — 悬浮窗宽度/位置/字号/主题(dark|light)/透明度/行数/点击穿透(缺省即内置默认)
 - `~/.config/dmnotifier/config.yaml` — dmnotifier 侧:pipeline 插件(需启用 `float`)
 
 ## 开发

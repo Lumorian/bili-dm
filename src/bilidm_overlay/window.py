@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from kotonoha.icons import lock_icon, settings_icon
 from kotonoha.platform import (
@@ -34,7 +35,9 @@ from .config import Config, save
 from .danmaku.avatars import AvatarCache
 from .danmaku.lifecycle import Wall
 from .danmaku.model import Danmaku
-from .danmaku.wall import PANEL_BG, PANEL_RADIUS, WallWidget
+from .danmaku.theme import panel_rgb
+from .danmaku.wall import PANEL_RADIUS, WallWidget
+from .layershell_qt_compat import ensure_for_session
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +66,8 @@ class DanmakuWindow(QWidget):
         super().__init__()
         self._cfg = cfg
         self._room_filter = room_filter
-        self._wall = Wall(max_rows=cfg.max_rows, ttl=cfg.ttl_seconds)
+        self._wall = Wall(max_rows=cfg.max_rows)
+        self._last_feed: float | None = None  # 最后一条弹幕的单调时钟(空闲隐藏用)
         self._passthrough = cfg.click_through
         self._status = ""
         self._timer = QTimer(self)
@@ -73,6 +77,10 @@ class DanmakuWindow(QWidget):
         self.setWindowTitle("Bilidm Overlay")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
+        # 系统 layer-shell-qt 与 PyQt6 wheel 的 Qt 大版本 ABI 不一致时,桥会加载失败,
+        # layer-shell 能力整体消失(窗口退化成普通顶层窗:拖不动/不穿透/不定位)。
+        # 这一步在桥 dlopen 之前补上兼容库,详见 layershell_qt_compat。
+        ensure_for_session(QGuiApplication.platformName())
         desktop = QGuiApplication.instance().property("xdg_current_desktop") or ""
         controller = LayerShellController(
             default_package_dir(), QGuiApplication.platformName(), desktop
@@ -80,6 +88,19 @@ class DanmakuWindow(QWidget):
         self._host = QtWindowHost(self)
         self._platform = DefaultOverlayPlatformFactory(controller)(self._host)
         self._platform.prepare()
+        capabilities = self._platform.capabilities
+        if not capabilities.layer_shell:
+            # 退化路径必须说清楚,否则用户只看到"拖不动、不穿透"却不知为何:
+            # Wayland 的普通顶层窗由合成器排布,客户端既不能定位也不能自绘穿透。
+            logger.warning(
+                "layer-shell 不可用(退化为普通窗口,无法拖动/穿透/定位):%s",
+                capabilities.layer_shell_reason or "原因未知",
+            )
+        elif not capabilities.client_positioning:
+            logger.warning(
+                "本次会话不允许客户端定位窗口,拖动与位置记忆不可用:%s",
+                capabilities.client_positioning_reason or "原因未知",
+            )
         # 控制栏先建好,set_passthrough 才能同步锁按钮的图标/可见性
         self._control_bar = self._build_controls()
         # make_overlay 把窗口提升为 layer-shell 表面:不调用时在 niri/KWin 上只是普通
@@ -89,18 +110,31 @@ class DanmakuWindow(QWidget):
         if QGuiApplication.platformName().startswith("wayland"):
             result = self._platform.activate()
             if not result.succeeded:
-                logger.debug("layer-shell activation skipped: %s", result.reason or "no reason given")
+                logger.debug(
+                    "layer-shell activation skipped: %s", result.reason or "no reason given"
+                )
         # 表面(层壳角色)就绪后再设穿透:经输入区域切换,而不是重建表面
         self.set_passthrough(self._passthrough)
 
-        self._layer_pos = QPoint(cfg.position[0], cfg.position[1])
+        self._layer_pos = self._usable_position(cfg.position[0], cfg.position[1])
+        # 位置记忆:layer-shell 下 w.move() 是 no-op,只能经桥的锚点设一次。不设的话
+        # 不但恢复不了上次的位置,拖动的基线也停在 (0,0)——第一次按下拖动整块面板
+        # 会直接跳走(位移被算成从原点起的绝对坐标)。
+        if capabilities.client_positioning:
+            moved = self._platform.move_to(
+                WindowPoint(self._layer_pos.x(), self._layer_pos.y())
+            )
+            if not moved.succeeded:
+                logger.debug("位置恢复跳过:%s", moved.reason or "原因未知")
         self._dragging = False
         self._resizing = False
-        self._drag_local = QPoint()
+        self._drag_origin_global = QPoint()  # 按下时的全局指针
+        self._drag_origin_pos = QPoint()  # 按下时的窗口位置
         self._resize_start: tuple[QPoint, QPoint] | None = None  # (按下点, 原尺寸)
 
         self._wall_widget = WallWidget(self)
         self._wall_widget.set_font(cfg.font_family, cfg.font_size)
+        self._wall_widget.set_theme(getattr(cfg, "theme", "dark"))
         self._wall_widget.set_show_tag(show_tag)
         self._avatars = AvatarCache(self)
         self._avatars.loaded.connect(self._on_avatars_loaded)
@@ -135,9 +169,10 @@ class DanmakuWindow(QWidget):
             key = f"{d.platform}:{d.rid}"
             if d.rid and d.platform and key != self._room_filter:
                 return
-        self._wall.add(d, self._now())
+        self._wall.add(d)
+        self._last_feed = time.monotonic()
         # 同步推给绘制 widget:_tick 只在事件循环里跑,同步测试无法先等到下一帧
-        self._wall_widget.update_wall(self._wall, self._now())
+        self._wall_widget.update_wall(self._wall)
         self.set_status("")
         if not self.isVisible():
             self.show()
@@ -217,7 +252,8 @@ class DanmakuWindow(QWidget):
                 super().mousePressEvent(a0)
                 return
             self._dragging = True
-            self._drag_local = pos
+            self._drag_origin_global = gp
+            self._drag_origin_pos = QPoint(self._layer_pos)
             a0.accept()
             return
         super().mousePressEvent(a0)
@@ -237,8 +273,11 @@ class DanmakuWindow(QWidget):
         if self._dragging and a0.buttons() & Qt.MouseButton.LeftButton:
             local = a0.position().toPoint()
             gp = a0.globalPosition().toPoint()
-            # 位置记忆:layer-shell 下合成器不接受客户端查询,用本地累计
-            self._layer_pos += local - self._drag_local
+            # 位置记忆:layer-shell 下合成器不接受客户端查询(win.pos() 永远报请求值),
+            # 只能自己算。拖动是"窗口跟手"的一比一映射,所以终点就是
+            # "按下时的位置 + 指针从按下到现在的位移"——用指针位移而不是本地坐标增量:
+            # 面板跟着指针走时本地坐标几乎不动,拿它累计会一路少算甚至原地不动。
+            self._layer_pos = self._drag_origin_pos + (gp - self._drag_origin_global)
             self._platform.update_drag(
                 WindowPoint(local.x(), local.y()),
                 WindowPoint(gp.x(), gp.y()),
@@ -263,9 +302,29 @@ class DanmakuWindow(QWidget):
             return
         super().mouseReleaseEvent(a0)
 
+    def _usable_position(self, x: int, y: int) -> QPoint:
+        """把存下来的位置收进"看得见"的范围。
+
+        位置是拖出来的,而拖动曾经算错(见 mouseMoveEvent):历史配置里可能留有几十万
+        的坐标。启动时照搬这种值会把面板放到屏幕外——对用户来说就是"窗口彻底不见了",
+        比位置不准更糟。落在所有屏幕之外时退回配置里的默认锚点,并提示一句。"""
+        point = QPoint(x, y)
+        screens = QGuiApplication.screens()
+        if not screens:
+            return point
+        for screen in screens:
+            if screen.geometry().contains(point):
+                return point
+        # 允许面板有一部分伸到屏幕外(贴边),但左上角必须落在某块屏幕内。
+        fallback = QPoint(24, 100)
+        logger.warning("配置里的位置 (%d, %d) 不在任何屏幕内,退回 %s", x, y, fallback)
+        return fallback
+
     def _in_resize_grab(self, pos: QPoint) -> bool:
         """右下角缩放手柄命中区(无可见手柄,拖拽手感与原来一致)。"""
-        return pos.x() >= self.width() - RESIZE_GRAB_PX and pos.y() >= self.height() - RESIZE_GRAB_PX
+        return (
+            pos.x() >= self.width() - RESIZE_GRAB_PX and pos.y() >= self.height() - RESIZE_GRAB_PX
+        )
 
     def _save_geometry(self) -> None:
         self._cfg.position = [self._layer_pos.x(), self._layer_pos.y()]
@@ -303,14 +362,16 @@ class DanmakuWindow(QWidget):
         return bar
 
     def _apply_card_background(self, opacity: float) -> None:
-        """给卡片容器填上圆角半透明深色背景(QSS 绘制,子控件保持透明)。
+        """给卡片容器填上圆角半透明底色(QSS 绘制,子控件保持透明)。
 
-        QSS 无选择器声明只作用于容器自身;窗口已设 WA_TranslucentBackground,
-        四角默认透明,视觉上就是圆角卡片。圆角值与 niri layer-rule 的
-        geometry-corner-radius 保持同步(见 danmaku/wall.py PANEL_RADIUS)。
+        底色取当前主题的官方令牌(深色 `--bg2:#101011` / 浅色 `#F6F7F8`,见
+        danmaku/theme.py)。QSS 无选择器声明只作用于容器自身;窗口已设
+        WA_TranslucentBackground,四角默认透明,视觉上就是圆角卡片。圆角值与
+        niri layer-rule 的 geometry-corner-radius 保持同步(见 danmaku/wall.py)。
         """
+        r, g, b = panel_rgb(getattr(self._cfg, "theme", "dark"))
         self._container.setStyleSheet(
-            f"background: rgba({PANEL_BG[0]}, {PANEL_BG[1]}, {PANEL_BG[2]}, {opacity});"
+            f"background: rgba({r}, {g}, {b}, {opacity});"
             f" border-radius: {PANEL_RADIUS}px;"
         )
 
@@ -331,15 +392,10 @@ class DanmakuWindow(QWidget):
         lock.setToolTip("已锁定" if self._passthrough else "已解锁")
 
     # --- 内部 ---
-    def _now(self) -> float:
-        import time as _t
-
-        return _t.monotonic()
-
     def _tick(self) -> None:
-        self._wall.prune(self._now())
-        self._wall_widget.update_wall(self._wall, self._now())
-        if self._cfg.hide_when_idle_seconds and self.row_count() == 0:
+        # 无时间淡出:画面只在有新弹幕时变化;定时器仅服务"无新消息"空闲自动隐藏
+        idle = self._cfg.hide_when_idle_seconds
+        if idle and (self._last_feed is None or time.monotonic() - self._last_feed > idle):
             self.hide_window()
 
     def _on_avatars_loaded(self) -> None:
@@ -367,19 +423,21 @@ class DanmakuWindow(QWidget):
 
         dialog = SettingsDialog(self, self._cfg)
         if dialog.exec():
-            (size, opacity, rows, ttl, width, height, mode) = dialog.values()
+            (size, opacity, rows, width, height, mode, theme) = dialog.values()
             (
                 self._cfg.font_size,
                 self._cfg.opacity,
                 self._cfg.max_rows,
-                self._cfg.ttl_seconds,
                 self._cfg.width,
                 self._cfg.height,
                 self._cfg.mode,
-            ) = (size, opacity, rows, ttl, width, height, mode)
+                self._cfg.theme,
+            ) = (size, opacity, rows, width, height, mode, theme)
             self._wall_widget.set_font(self._cfg.font_family, size)
+            self._wall_widget.set_theme(self._cfg.theme)
             self._apply_card_background(opacity)
-            # 行数上限/TTL 变更即时生效;行数变更清空重来(与 v1 约定一致)
-            self._wall = Wall(max_rows=rows, ttl=ttl)
+            # 行数上限变更即时生效;行数变更清空重来(与 v1 约定一致)
+            self._wall = Wall(max_rows=rows)
+            self._wall_widget.update_wall(self._wall)
             self.resize(width, height)
             save(self._cfg)

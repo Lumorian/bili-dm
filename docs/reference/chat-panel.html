@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>官方弹幕面板度量页(用于核对 overlay 排版参数)</title>
+<!--
+  用途:直接用线上 CSS 复现官方聊天列表的一行,方便量出真实盒子(getBoundingClientRect),
+  再和 overlay/danmaku/medal.py 里的常量逐项对齐。headless 运行示例:
+
+    google-chrome --headless=new --dump-dom --window-size=400,400 \
+      file://$PWD/docs/reference/chat-panel.html | sed -n '/<pre id="out">/,/<\/pre>/p'
+
+  注意:样式表链接带构建 hash,官方重新发版后需按线上页面 <link> 更新。
+-->
+<link rel="stylesheet" href="https://s1.hdslb.com/bfs/static/jinkela/long/laputa-css/map.css">
+<link rel="stylesheet" href="https://s1.hdslb.com/bfs/static/jinkela/long/laputa-css/light.css">
+<link rel="stylesheet" href="https://s1.hdslb.com/bfs/static/blive/blfe-live-room/static/css/app.faa316e3436dd5610690.vip.css">
+<link rel="stylesheet" href="https://s1.hdslb.com/bfs/static/blive/blfe-live-room/static/css/8792.82ebcaaebb2ce0bea50c.vip.css">
+<style>
+  html, body { margin: 0; background: #F6F7F8; }
+  .chat-history-panel { width: 300px; }
+  .chat-history-list { height: 200px; }
+  /* 官方是靠 inline 流排的;这里的 display 声明让最小页面也能复现同样的盒子 */
+  .chat-item.danmaku-item { display: block; }
+  .chat-item.danmaku-item .danmaku-item-left { display: inline; }
+  .chat-item.danmaku-item .user-name { display: inline; }
+  .chat-item.danmaku-item .danmaku-item-right { display: inline; }
+  .fans-medal-item-ctnr { display: inline-block; vertical-align: middle; position: relative; }
+  .fans-medal-item .fans-medal-label { display: flex; }
+  .fans-medal-item .fans-medal-level { display: flex; }
+</style>
+</head>
+<body>
+<div class="chat-history-panel"><div class="chat-history-list"><div class="chat-items">
+  <div class="chat-item danmaku-item">
+    <div class="danmaku-item-left">
+      <div class="fans-medal-item-ctnr" id="ctnr1">
+        <div class="fans-medal-item" id="pill1"
+             style="background-image:linear-gradient(45deg,#638FFE,#5B8AF5);--borderColor:#638FFE">
+          <div class="fans-medal-label guard" id="lbl1">
+            <i class="medal-deco medal-guard" id="ico1"></i>
+            <div class="fans-medal-content" id="txt1" style="color:#FFF">酷萨</div>
+          </div>
+          <div class="fans-medal-level" id="lvl1">
+            <div class="fans-medal-level-font" style="color:#FFF">33</div>
+          </div>
+        </div>
+      </div>
+      <span class="user-name v-middle" id="nm1" style="color:#00D1F1">浮*** : </span>
+    </div>
+    <span class="danmaku-item-right v-middle" id="ct1">哈哈哈哈</span>
+  </div>
+  <div class="chat-item danmaku-item">
+    <div class="danmaku-item-left">
+      <div class="fans-medal-item-ctnr" id="ctnr2">
+        <div class="fans-medal-item" id="pill2"
+             style="background-image:linear-gradient(45deg,#FF86B2,#FF86B2);--borderColor:#FF86B2">
+          <div class="fans-medal-label" id="lbl2">
+            <div class="fans-medal-content" id="txt2" style="color:#FFF">酷萨</div>
+          </div>
+          <div class="fans-medal-level" id="lvl2">
+            <div class="fans-medal-level-font" style="color:#FFF">16</div>
+          </div>
+        </div>
+      </div>
+      <span class="user-name" id="nm2">予*** : </span>
+    </div>
+    <span class="danmaku-item-right" id="ct2">文本</span>
+  </div>
+</div></div></div>
+<pre id="out"></pre>
+<script>
+  const out = [];
+  const ids = ['ctnr1', 'pill1', 'lbl1', 'ico1', 'txt1', 'lvl1', 'nm1', 'ct1',
+               'ctnr2', 'pill2', 'lbl2', 'txt2', 'lvl2', 'nm2', 'ct2'];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    const r = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    out.push(id + ' x=' + r.x.toFixed(2) + ' y=' + r.y.toFixed(2) +
+      ' w=' + r.width.toFixed(2) + ' h=' + r.height.toFixed(2) +
+      ' pad=' + cs.paddingTop + '/' + cs.paddingRight + '/' + cs.paddingBottom + '/' + cs.paddingLeft +
+      ' mar=' + cs.marginLeft + '/' + cs.marginRight +
+      ' fs=' + cs.fontSize + ' lh=' + cs.lineHeight +
+      ' pos=' + cs.position + ' tf=' + cs.transform);
+  }
+  const item = document.querySelector('.chat-item.danmaku-item').getBoundingClientRect();
+  out.push('chat-item w=' + item.width.toFixed(2) + ' h=' + item.height.toFixed(2));
+  document.getElementById('out').textContent = out.join('\n');
+</script>
+</body>
+</html>

@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import QApplication
 
 from .client import DanmakuServer
 from .config import Config, load, merge_cli
-from .danmaku.model import Danmaku
+from .danmaku.model import Danmaku, MedalInfo
 from .window import DanmakuWindow
 
 logger = logging.getLogger(__name__)
@@ -26,22 +26,41 @@ DEMO_LINES = [
     "主播你好呀", "前排!!", "666666", "礼物闪电链!!!",
     "刚来,前面发生了什么", "这个主播的声线我爱了",
 ]
+# 演示用粉丝勋章:名字/等级/配色/是否舰队(对齐官方面板的几种典型样式)
+DEMO_MEDALS = [
+    MedalInfo(name="酷萨", level=33, color_start="#638FFE", color_end="#638FFE",
+              color_border="#638FFE", guard_level=3),
+    MedalInfo(name="酷萨", level=16, color_start="#FF86B2", color_end="#FF86B2",
+              color_border="#FF86B2"),
+    MedalInfo(name="小蛋糕", level=39, color_start="#5B8AF5", color_end="#638FFE",
+              color_border="#638FFE"),
+    None,  # 未佩戴勋章的用户
+]
 
 
 def _demo_danmaku(i: int) -> Danmaku:
+    """演示流:把官方面板的几种行都跑到(勋章/舰队/礼物/SC/上舰/点赞)。"""
+    medal = random.choice(DEMO_MEDALS)
+    guard = medal.guard_level if medal else 0
+    name = random.choice(DEMO_NAMES)
     if i == 0:
         return Danmaku(type="chat", platform="bilibili", rid="689422",
-                       name=random.choice(DEMO_NAMES), content=random.choice(DEMO_LINES))
+                       name=name, content=random.choice(DEMO_LINES),
+                       medal=medal, guard_level=guard, user_level=random.randint(3, 60))
     if i == 1:
         return Danmaku(type="gift", platform="bilibili", rid="689422",
-                       name=random.choice(DEMO_NAMES), item="辣条",
-                       num=random.randint(1, 99), price=0.1)
+                       name=name, item="辣条", num=random.randint(1, 99), price=0.1,
+                       medal=medal, guard_level=guard)
     if i == 2:
         return Danmaku(type="superchat", platform="bilibili", rid="689422",
-                       name=random.choice(DEMO_NAMES), content="加油加油!",
-                       price=random.choice([30, 50, 100]))
-    return Danmaku(type="subscribe", platform="bilibili", rid="689422",
-                   name=random.choice(DEMO_NAMES), item="大航海", num=1, price=150)
+                       name=name, content="加油加油!", price=random.choice([30, 50, 100]),
+                       medal=medal, guard_level=guard)
+    if i == 3:
+        return Danmaku(type="subscribe", platform="bilibili", rid="689422",
+                       name=name, item=random.choice(["舰长", "提督", "总督"]),
+                       num=1, price=198, medal=medal, guard_level=guard)
+    return Danmaku(type="like", platform="bilibili", rid="689422", name=name,
+                   user_level=random.randint(3, 60))
 
 
 async def _demo_gen(sink: list[Danmaku]) -> None:
@@ -72,6 +91,7 @@ def entry_point() -> None:
     parser.add_argument("--socket")
     parser.add_argument("--config")
     parser.add_argument("--no-tray", action="store_true")
+    parser.add_argument("--theme", choices=["dark", "light"], help="面板配色(dark/light,默认取配置)")
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -123,9 +143,9 @@ def entry_point() -> None:
                 return
         if args.demo:
             async def _demo_loop() -> None:
-                for i in range(60):
+                for i in range(120):
                     for w in windows:
-                        w.feed(_demo_danmaku(i % 4))
+                        w.feed(_demo_danmaku(i % 5))
                     await asyncio.sleep(0.4)
 
             asyncio.create_task(_demo_loop())

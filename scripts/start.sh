@@ -72,6 +72,14 @@ if [[ -n "${RUN_PID:-}" ]]; then
   fi
 fi
 
+# layer-shell 桥需要与 venv 里那份 Qt 同 ABI 的 layer-shell-qt:系统包跟着系统 Qt 走,
+# 而 PyQt6 的 wheel 固定自带一版,两者一大版本一错开,桥就 dlopen 失败——窗口会退化成
+# 普通顶层窗(不能拖动、不穿透、不定位)。这里缺就补一次;补不上不阻塞启动,
+# overlay 自己会报明原因。
+if ! "$ROOT/scripts/fetch-layer-shell-qt.sh" --ensure; then
+  echo "警告: 未能取回 ABI 兼容的 layer-shell-qt,悬浮窗可能无法拖动(见 overlay/README 的排错一节)。" >&2
+fi
+
 # 组装 --room 参数,透传给 overlay(房间分组/标签由 overlay 配置决定)
 OVERLAY_ARGS=()
 for room in "${ROOM_ARGS[@]}"; do
