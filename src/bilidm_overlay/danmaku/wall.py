@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import QWidget
 from . import style as sty
 from .avatars import AVATAR_SIDE, AvatarCache
 from .layout import Run, block_height, wrap_runs
-from .lifecycle import Row, Wall, visible_window
+from .lifecycle import Row, Wall, added_height, scroll_offset_by, viewport
 from .medal import (
     BASE_FONT_PX,
     GUARD_ICON,
@@ -68,6 +68,17 @@ TEXT_X = PANEL_PAD_X + AVATAR_SIDE + AVATAR_GAP  # 正文列起点(旧测试依�
 GUARD_NAME_COLOR = "#00D1F1"
 # 系统行(点赞/进房等)描述灰,官方 interact 行 #999999
 SYSTEM_NAME_COLOR = "#999999"
+# 滚动条:细窄放在右侧留白里(10px padding 足够放 4px 轨道,不压正文)
+SCROLLBAR_WIDTH = 4.0
+SCROLLBAR_RIGHT_GAP = 3.0
+SCROLLBAR_MIN_HANDLE = 20.0
+SCROLLBAR_ALPHA = 70  # 常态
+SCROLLBAR_ACTIVE_ALPHA = 150  # 悬停/拖动
+# 上滚时右下角的「回到最新」提示药丸
+JUMP_HINT_W = 84.0
+JUMP_HINT_H = 20.0
+JUMP_HINT_ROWS = 4
+
 # 醒目留言卡片默认底色(官方 SC 主题黄)与圆角
 SC_CARD_START = "#F2C55C"
 SC_CARD_END = "#E9A100"
@@ -107,6 +118,15 @@ class WallWidget(QWidget):
         self._layout_cache: dict[tuple, tuple[list, float]] = {}
         self._font_cache: dict[tuple[int, bool], QFont] = {}
         self._metrics_cache: dict[tuple[int, bool], QFontMetricsF] = {}
+        # 悬停高亮/指针形状需要无按键的 move 事件
+        self.setMouseTracking(True)
+        # 滚动:offset 是"从底部往上翻了多少像素";0 = 贴底跟随最新
+        self._scroll_offset = 0.0
+        self._last_rows: list[Row] = []
+        self._last_vp = None  # 上一帧的视口回执(滚动条命中/几何用)
+        self._scrollbar_hover = False
+        self._scrollbar_drag: float | None = None  # 拖动起点 = 按下时的 offset
+        self._jump_hover = False
 
     # --- 配置 ---
     def set_avatars(self, cache: AvatarCache | None) -> None:
@@ -134,11 +154,76 @@ class WallWidget(QWidget):
         self.update()
 
     def update_wall(self, wall: Wall) -> None:
+        """换墙或墙内容更新。
+
+        往上翻着看历史时来了新弹幕:offset 要跟着底部一起长,否则"距底部 N 像素"
+        被新的底推走,画面会自己往上漂 —— 手没动,内容却在动。
+        """
+        if wall is not self._wall:
+            # 换了一块墙(如设置里改了行数上限):旧的偏移没有意义了
+            self._scroll_offset = 0.0
+            self._last_rows = []
         self._wall = wall
+        rows = wall.snapshot()
+        if self._scroll_offset > 0.0:
+            self._scroll_offset += self._added_height(self._last_rows, rows)
+        self._last_rows = rows
         self.update()
+
+    def _added_height(self, previous: list[Row], current: list[Row]) -> float:
+        return added_height(previous, current, self._row_block_height)
+
+    def _row_block_height(self, row: Row) -> float:
+        """一行占的总高(含行距),用于滚动几何。"""
+        _lines, height = self._prepare(row, self._text_width())
+        return height + 2 * ROW_PAD
 
     def row_count(self) -> int:
         return len(self._wall.snapshot()) if self._wall else 0
+
+    # --- 滚动 ---
+    def scroll_offset(self) -> float:
+        return self._scroll_offset
+
+    def is_following(self) -> bool:
+        """是否贴着底部(跟随最新)。"""
+        return self._scroll_offset <= 0.0
+
+    def max_scroll(self) -> float:
+        """还能往上翻多少像素(0 = 内容不满一屏,没得滚)。"""
+        if self._wall is None:
+            return 0.0
+        rows = self._wall.snapshot()
+        total = sum(self._row_block_height(row) for row in rows)
+        return max(0.0, total - self._available_height())
+
+    def _available_height(self) -> float:
+        return float(self.height() - 2 * PANEL_PAD_Y)
+
+    def scroll_by(self, delta: float) -> None:
+        """正 delta = 往上看更旧的内容。"""
+        if self._wall is None:
+            return
+        rows = self._wall.snapshot()
+        new = scroll_offset_by(
+            self._scroll_offset, delta, rows, self._available_height(), self._row_block_height
+        )
+        if new != self._scroll_offset:
+            self._scroll_offset = new
+            self.update()
+
+    def scroll_to_bottom(self) -> None:
+        """回到最新(底部):再次跟随新弹幕。"""
+        if self._scroll_offset:
+            self._scroll_offset = 0.0
+            self.update()
+
+    def scroll_to_top(self) -> None:
+        """翻到最旧一条。"""
+        top = self.max_scroll()
+        if top != self._scroll_offset:
+            self._scroll_offset = top
+            self.update()
 
     # --- 度量 ---
     @property
@@ -317,20 +402,213 @@ class WallWidget(QWidget):
         rows = self._wall.snapshot()
         text_width = self._text_width()
         prepped = {id(row): self._prepare(row, text_width) for row in rows}
-        visible = visible_window(
+        vp = viewport(
             rows,
-            avail_height=float(self.height() - 2 * PANEL_PAD_Y),
+            avail_height=self._available_height(),
             measure=lambda row: prepped[id(row)][1] + 2 * ROW_PAD,
+            offset=self._scroll_offset,
+            pad_top=PANEL_PAD_Y,
         )
-        y = PANEL_PAD_Y
-        for row in visible:
+        # offset 可能被 clamp(内容变短、滚到顶):把实际值写回去,否则内部状态会和
+        # 画面对不上 —— 用户滚到顶之后,再来的新弹幕会按过期的偏移去加。
+        self._scroll_offset = vp.offset
+        self._last_vp = vp
+        # 滚动中的行会越过顶部/底部边界:裁进内容区(内边距之内),别让文字渗到留白里
+        painter.save()
+        painter.setClipRect(
+            QRectF(
+                PANEL_PAD_X,
+                PANEL_PAD_Y,
+                max(0.0, self.width() - 2 * PANEL_PAD_X),
+                max(0.0, self.height() - 2 * PANEL_PAD_Y),
+            )
+        )
+        for row, y in vp.entries:
             lines, height = prepped[id(row)]
             if row.msg.type == sty.KIND_SUPERCHAT:
                 self._paint_superchat(painter, row, lines, height, y)
             else:
                 self._paint_row(painter, row, lines, height, y)
-            y += height + 2 * ROW_PAD
+        painter.restore()
+        # 滚动条与「回到最新」落在留白里,不受内容区裁切
+        self._paint_scrollbar(painter, vp)
+        self._paint_jump_hint(painter, vp)
         painter.end()
+
+    # --- 滚动条 / 回到最新 ---
+    def _scrollbar_track(self) -> QRectF:
+        """滑块活动的竖直轨道(贴在右侧 padding 里,不压正文)。"""
+        top = PANEL_PAD_Y
+        height = max(0.0, float(self.height()) - 2 * PANEL_PAD_Y)
+        x = float(self.width()) - PANEL_PAD_X + SCROLLBAR_RIGHT_GAP
+        x = min(x, float(self.width()) - SCROLLBAR_WIDTH - 1.0)
+        return QRectF(x, top, SCROLLBAR_WIDTH, height)
+
+    def _scrollbar_hit_area(self) -> QRectF:
+        """滚动条的命中区:视觉只有 4px,命中放宽到 12px(否则要点得极其精准)。"""
+        return self._scrollbar_track().adjusted(-4, 0, 4, 0)
+
+    def _scrollbar_handle(self, vp) -> QRectF | None:
+        """滑块矩形;内容不满一屏时没有滑块。"""
+        track = self._scrollbar_track()
+        if vp.max_offset <= 0 or vp.content_height <= 0 or track.height() <= 0:
+            return None
+        ratio = max(0.0, vp.avail_height) / vp.content_height
+        handle_h = max(SCROLLBAR_MIN_HANDLE, track.height() * min(1.0, ratio))
+        # offset=0(贴底)时滑块在最下,offset=max 时在最上
+        travel = track.height() - handle_h
+        pos = 1.0 - (vp.offset / vp.max_offset if vp.max_offset else 0.0)
+        return QRectF(track.x(), track.y() + travel * pos, track.width(), handle_h)
+
+    def _paint_scrollbar(self, painter: QPainter, vp) -> None:
+        handle = self._scrollbar_handle(vp)
+        if handle is None:
+            return
+        alpha = (
+            SCROLLBAR_ACTIVE_ALPHA
+            if (self._scrollbar_hover or self._scrollbar_drag is not None)
+            else SCROLLBAR_ALPHA
+        )
+        # 深色面板上白滑块,浅色面板上黑滑块:同一个 alpha 在两种底上观感一致
+        tint = QColor(255, 255, 255) if self._theme.name == "dark" else QColor(0, 0, 0)
+        tint.setAlpha(alpha)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(tint)
+        radius = handle.width() / 2
+        painter.drawRoundedRect(handle, radius, radius)
+
+    def _jump_hint_rect(self) -> QRectF:
+        """右下角「回到最新」药丸:与输入条同侧,不挡正文首字符。"""
+        w = JUMP_HINT_W
+        h = JUMP_HINT_H
+        return QRectF(
+            float(self.width()) - w - 12.0,
+            float(self.height()) - h - 8.0,
+            w,
+            h,
+        )
+
+    def _paint_jump_hint(self, painter: QPainter, vp) -> None:
+        """往上翻着看时,右下角提示还有几条新的;点一下回到底部。"""
+        if vp.following or vp.max_offset <= 0:
+            return
+        hidden = self._rows_below_viewport(vp)
+        rect = self._jump_hint_rect()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 40 if not self._jump_hover else 70))
+        painter.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+        font = self._font_for(self._size * 0.85)
+        painter.setFont(font)
+        painter.setPen(QColor(self._theme.text))
+        text = f"↓ {hidden} 条新弹幕" if hidden else "↓ 回到最新"
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    # --- 交互:滚轮 / 拖动滚动条 / 点「回到最新」 ---
+    def wheelEvent(self, event) -> None:
+        """滚轮往上 = 看更旧的内容。
+
+        一次滚轮通常 120 单位 ≈ 3 行(官方聊天列表面板同样一次滚三行)。
+        """
+        delta = event.angleDelta().y()
+        if delta == 0:
+            event.ignore()
+            return
+        self.scroll_by(delta / 120.0 * 3 * self._line_height())
+        event.accept()
+
+    def mousePressEvent(self, event) -> None:
+        """只接管滚动条与「回到最新」药丸;其余一律放行,交给窗口拖拽。
+
+        这条放行很关键:解锁后整个面板都能拖,墙吞掉按下事件会让"按住内容拖窗口"
+        失效 —— 那是窗口的既有行为,不能因为加了滚动而丢。
+        """
+        if event.button() != Qt.MouseButton.LeftButton:
+            event.ignore()
+            return
+        pos = event.position()
+        vp = self._last_vp
+        if vp is not None and not vp.following and self._jump_hint_rect().contains(pos):
+            self.scroll_to_bottom()
+            event.accept()
+            return
+        handle = self._scrollbar_handle(vp) if vp is not None else None
+        if handle is not None and self._scrollbar_hit_area().contains(pos):
+            # 点轨道任意处先跳过去,再开始拖:和原生滚动条一致
+            self._scrollbar_drag = 0.0
+            self._scroll_to_handle_pos(pos.y())
+            event.accept()
+            return
+        event.ignore()
+
+    def mouseMoveEvent(self, event) -> None:
+        vp = self._last_vp
+        if self._scrollbar_drag is not None:
+            self._scroll_to_handle_pos(event.position().y())
+            event.accept()
+            return
+        # 仅用于鼠标指针形状与滚动条高亮
+        hover_bar = False
+        hover_jump = False
+        if vp is not None:
+            handle = self._scrollbar_handle(vp)
+            hover_bar = handle is not None and self._scrollbar_hit_area().contains(
+                event.position()
+            )
+            hover_jump = not vp.following and self._jump_hint_rect().contains(event.position())
+        if (hover_bar, hover_jump) != (self._scrollbar_hover, self._jump_hover):
+            self._scrollbar_hover = hover_bar
+            self._jump_hover = hover_jump
+            self.setCursor(
+                Qt.CursorShape.PointingHandCursor
+                if (hover_bar or hover_jump)
+                else Qt.CursorShape.ArrowCursor
+            )
+            self.update()
+        event.ignore()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._scrollbar_drag is not None:
+            self._scrollbar_drag = None
+            event.accept()
+            return
+        event.ignore()
+
+    def leaveEvent(self, event) -> None:
+        if self._scrollbar_hover or self._jump_hover:
+            self._scrollbar_hover = False
+            self._jump_hover = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.update()
+        super().leaveEvent(event)
+
+    def _scroll_to_handle_pos(self, y: float) -> None:
+        """把滑块拖到 y 处(或点轨道跳过去):换算成 offset。"""
+        vp = self._last_vp
+        if vp is None or vp.max_offset <= 0:
+            return
+        track = self._scrollbar_track()
+        handle = self._scrollbar_handle(vp)
+        if handle is None:
+            return
+        travel = track.height() - handle.height()
+        if travel <= 0:
+            return
+        # 指针相对于"滑块可以走的那段行程"的比例,0=最上=看最旧
+        ratio = (y - track.y() - handle.height() / 2) / travel
+        ratio = min(1.0, max(0.0, ratio))
+        self._scroll_offset = (1.0 - ratio) * vp.max_offset
+        self.update()
+
+    def _rows_below_viewport(self, vp) -> int:
+        """当前视口下方(更新的一侧)还有多少条 —— 药丸上的数字。"""
+        rows = self._wall.snapshot() if self._wall else []
+        shown = {id(row) for row in vp.rows()}
+        count = 0
+        for row in reversed(rows):
+            if id(row) in shown:
+                break
+            count += 1
+        return count
 
     # --- 绘制 ---
     def _paint_row(self, painter: QPainter, row: Row, lines: list, height: float, y: float) -> None:

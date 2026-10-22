@@ -344,3 +344,79 @@ def test_send_without_cookie_explains_that_reading_needs_no_login(app, monkeypat
     hint = win._composer.hint_text()
     assert "bili_jct" in hint
     assert "看弹幕不用登录" in hint, "得解释清「能看不能发」的原因"
+
+
+# --- 翻阅历史:键盘入口与"翻着看时别自动隐藏" ---
+
+
+def test_pageup_pagedown_scroll_history(app, monkeypatch):
+    """解锁后 PageUp/PageDown 一屏、Home/End 到两端。"""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QKeyEvent
+
+    win = _window(app, monkeypatch)
+    for i in range(60):
+        win.feed(Danmaku(type="chat", name=f"u{i}", content=f"第 {i} 条"))
+    win.show()
+    app.processEvents()
+    assert win.is_following_latest() is True
+
+    def _key(k):
+        return QKeyEvent(QKeyEvent.Type.KeyPress, k, Qt.KeyboardModifier.NoModifier)
+
+    win.keyPressEvent(_key(Qt.Key.Key_PageUp))
+    assert win.scroll_offset() > 0, "PageUp 应往上翻一屏"
+    win.keyPressEvent(_key(Qt.Key.Key_End))
+    assert win.is_following_latest() is True, "End 回到最新"
+    win.keyPressEvent(_key(Qt.Key.Key_Home))
+    assert abs(win.scroll_offset() - win._wall_widget.max_scroll()) < 0.5
+    win.keyPressEvent(_key(Qt.Key.Key_PageDown))
+    assert win.is_following_latest() is False, "PageDown 往下翻一屏"
+
+
+def test_idle_hide_waits_while_user_reads_history(app, monkeypatch):
+    """往上翻着看历史时不能把窗口隐藏:那等于把用户正在读的书合上。"""
+    import time
+
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QKeyEvent
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+    win = _window(app, monkeypatch, hide_when_idle_seconds=10)
+    for i in range(60):
+        win.feed(Danmaku(type="chat", name=f"u{i}", content=f"第 {i} 条"))
+    win.show()
+    app.processEvents()
+    win.keyPressEvent(
+        QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_PageUp, Qt.KeyboardModifier.NoModifier)
+    )
+    clock["t"] = 5000.0  # 远超空闲阈值
+    win._tick()
+    assert win.isVisible() is True, "翻着历史时不该被空闲隐藏"
+    win.scroll_to_bottom()
+    win._tick()
+    assert win.isVisible() is False, "回到底部后空闲隐藏恢复正常"
+
+
+def test_scroll_input_does_not_lose_drag(app, monkeypatch):
+    """滚动用的按下/移动不能吞掉窗口拖拽(解锁后整块面板可拖是既有行为)。"""
+    from PyQt6.QtCore import QEvent, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+
+    win = _window(app, monkeypatch, click_through=False)
+    for i in range(60):
+        win.feed(Danmaku(type="chat", name=f"u{i}", content=f"第 {i} 条"))
+    win.show()
+    app.processEvents()
+    wall = win._wall_widget
+    ev = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(wall.width() / 2, wall.height() / 2),
+        QPointF(300.0, 300.0),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    wall.mousePressEvent(ev)
+    assert ev.isAccepted() is False, "空白处按下必须放行,交给窗口拖拽"

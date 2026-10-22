@@ -215,6 +215,25 @@ class DanmakuWindow(QWidget):
     def row_count(self) -> int:
         return self._wall_widget.row_count()
 
+    # --- 翻阅历史 ---
+    def scroll_by(self, delta: float) -> None:
+        """正 delta = 往上看更旧的内容(滚轮/PageUp 都走这里)。"""
+        self._wall_widget.scroll_by(delta)
+
+    def scroll_to_bottom(self) -> None:
+        """回到最新(底部)。"""
+        self._wall_widget.scroll_to_bottom()
+
+    def scroll_to_top(self) -> None:
+        """翻到最旧一条。"""
+        self._wall_widget.scroll_to_top()
+
+    def is_following_latest(self) -> bool:
+        return self._wall_widget.is_following()
+
+    def scroll_offset(self) -> float:
+        return self._wall_widget.scroll_offset()
+
     def status_text(self) -> str:
         return self._status
 
@@ -343,6 +362,30 @@ class DanmakuWindow(QWidget):
             a0.accept()
             return
         super().mouseReleaseEvent(a0)
+
+    def keyPressEvent(self, a0) -> None:
+        """翻阅历史的键盘入口:PageUp/PageDown 一屏,Home/End 到两端。
+
+        只在解锁(窗口可交互)时成立:锁定态整个窗口在往外放行输入,按键本来
+        就到这里了才会被处理 —— 不会抢下层窗口的键。
+        """
+        key = a0.key() if a0 is not None else None
+        if key is None:
+            super().keyPressEvent(a0)
+            return
+        page = max(40.0, self._wall_widget.height() - 40.0)
+        if key == Qt.Key.Key_PageUp:
+            self.scroll_by(page)
+        elif key == Qt.Key.Key_PageDown:
+            self.scroll_by(-page)
+        elif key == Qt.Key.Key_Home:
+            self._wall_widget.scroll_to_top()
+        elif key == Qt.Key.Key_End:
+            self.scroll_to_bottom()
+        else:
+            super().keyPressEvent(a0)
+            return
+        a0.accept()
 
     def _usable_position(self, x: int, y: int) -> QPoint:
         """把存下来的位置收进"看得见"的范围。
@@ -521,7 +564,12 @@ class DanmakuWindow(QWidget):
     def _tick(self) -> None:
         # 无时间淡出:画面只在有新弹幕时变化;定时器仅服务"无新消息"空闲自动隐藏
         idle = self._cfg.hide_when_idle_seconds
-        if idle and (self._last_feed is None or time.monotonic() - self._last_feed > idle):
+        if not idle:
+            return
+        if not self._wall_widget.is_following():
+            # 用户正在往上翻历史:这时候隐藏窗口等于把书合上,必须等他回到底部
+            return
+        if self._last_feed is None or time.monotonic() - self._last_feed > idle:
             self.hide_window()
 
     def _on_avatars_loaded(self) -> None:
@@ -537,6 +585,8 @@ class DanmakuWindow(QWidget):
         toggle.setChecked(self._passthrough)
         toggle.setToolTip("开启后鼠标可穿过悬浮窗;关闭后窗口可拖拽")
         toggle.triggered.connect(lambda on: self.set_passthrough(on))
+        latest_action = menu.addAction("回到最新弹幕")
+        latest_action.triggered.connect(self.scroll_to_bottom)
         settings_action = menu.addAction("设置…")
         settings_action.triggered.connect(self._open_settings)
         quit_action = menu.addAction("退出")
@@ -570,6 +620,6 @@ class DanmakuWindow(QWidget):
             self._apply_card_background(opacity)
             # 行数上限变更即时生效;行数变更清空重来(与 v1 约定一致)
             self._wall = Wall(max_rows=rows)
-            self._wall_widget.update_wall(self._wall)
+            self._wall_widget.update_wall(self._wall)  # 换墙会顺带把滚动偏移清零
             self.resize(width, height)
             save(self._cfg)
