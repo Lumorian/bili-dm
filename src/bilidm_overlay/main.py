@@ -92,6 +92,8 @@ def entry_point() -> None:
     parser.add_argument("--config")
     parser.add_argument("--no-tray", action="store_true")
     parser.add_argument("--theme", choices=["dark", "light"], help="面板配色(dark/light,默认取配置)")
+    parser.add_argument("--no-send", action="store_true", help="隐藏底部的发弹幕输入条")
+    parser.add_argument("--send-cookie", help="发弹幕用的登录 cookie(含 SESSDATA 与 bili_jct)")
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -103,6 +105,10 @@ def entry_point() -> None:
 
     cfg = load(Path(args.config) if args.config else None)
     cfg = merge_cli(cfg, args)
+    if args.demo:
+        # 演示流是假消息,发弹幕既没有房间也没有登录态:藏起输入条,别给个必然失败
+        # 的入口
+        cfg.send_enabled = False
 
     app = QApplication(sys.argv)
     loop = qasync.QEventLoop(app)

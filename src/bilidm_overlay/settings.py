@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -97,6 +98,13 @@ class SettingsDialog(QDialog):
         self._theme.addItems(["dark", "light"])
         if getattr(cfg, "theme", "dark") in ("dark", "light"):
             self._theme.setCurrentText(cfg.theme)
+        # --- 发弹幕区 ---
+        self._send_enabled = QCheckBox("在卡片底部显示输入条", self)
+        self._send_enabled.setChecked(getattr(cfg, "send_enabled", True))
+        self._send_cookie = QLineEdit(self)
+        self._send_cookie.setPlaceholderText("SESSDATA=…; bili_jct=…(留空则用房间订阅时的 cookie)")
+        self._send_cookie.setEchoMode(QLineEdit.EchoMode.Password)
+        self._send_cookie.setText(getattr(cfg, "send_cookie", "") or "")
         form.addRow("字号", self._font)
         form.addRow("主题", self._theme)
         form.addRow("透明度", self._opacity)
@@ -106,6 +114,23 @@ class SettingsDialog(QDialog):
         form.addRow("窗口模式", self._mode)
         root.addLayout(form)
 
+        # --- 发弹幕区:登录态只用于发送,cookie 里的 bili_jct 同时充当 csrf ---
+        root.addWidget(QLabel("发弹幕(需登录 cookie,含 SESSDATA 与 bili_jct):"))
+        self._send_enabled.setText("启用发送栏")
+        root.addWidget(self._send_enabled)
+        cookie_row = QHBoxLayout()
+        cookie_row.addWidget(self._send_cookie, 1)
+        reveal = QPushButton("显示", self)
+        reveal.setCheckable(True)
+        reveal.toggled.connect(self._toggle_cookie_visible)
+        cookie_row.addWidget(reveal)
+        root.addLayout(cookie_row)
+        self._send_note = QLabel("", self)
+        self._send_note.setStyleSheet("color: #9AA0A6; font-size: 11px;")
+        self._send_note.setWordWrap(True)
+        root.addWidget(self._send_note)
+        self._refresh_send_note()
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -113,6 +138,7 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
+        self._send_cookie.textChanged.connect(self._refresh_send_note)
         self.reload_services()
 
     # --- 房间管理 ---
@@ -153,6 +179,31 @@ class SettingsDialog(QDialog):
             self.reload_services()
         except UniBarrageError as exc:
             self._note.setText(f"添加失败: {exc}")
+
+    # --- 发弹幕 ---
+    def _toggle_cookie_visible(self, show: bool) -> None:
+        self._send_cookie.setEchoMode(
+            QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
+        )
+
+    def _refresh_send_note(self) -> None:
+        """cookie 缺 bili_jct 时当场说清楚:否则点发送只会收到一个 -111。"""
+        from .sender import parse_csrf
+
+        cookie = self._send_cookie.text().strip()
+        if not cookie:
+            self._send_note.setText(
+                "未填 cookie:将沿用 --room 参数里的 cookie,或 dmnotifier history 中该房间的 cookie。"
+            )
+            return
+        if not parse_csrf(cookie):
+            self._send_note.setText("cookie 里没有 bili_jct,发不出去:请从浏览器复制完整 cookie。")
+            return
+        self._send_note.setText("cookie 看起来可用。")
+
+    def send_values(self) -> tuple[bool, str]:
+        """发弹幕设置:(启用发送栏, 发送用 cookie)。"""
+        return self._send_enabled.isChecked(), self._send_cookie.text().strip()
 
     # --- 结果 ---
     def values(self) -> tuple[int, float, int, int, int, str, str]:

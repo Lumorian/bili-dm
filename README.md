@@ -20,6 +20,15 @@
   磁盘缓存(`~/.cache/bilidm-overlay/avatars/`),未就绪时灰色圆形占位(名字首字)
 - **深/浅两套官方配色**:`theme: dark`(默认,`--bg2:#101011`)/ `light`(`#F6F7F8`),
   令牌取自官方 bili-theme;CLI `--theme`、设置对话框、`config.yaml` 均可切换
+- **发弹幕(仿官方弹幕姬)**:卡片底部一条输入条(官方面板输入条的位置),20 字上限、
+  回车即发、发送后立刻本地回显(官方同样即时上屏),WebSocket 把同一条回推回来时不重复插入;
+  走官方 `msg/send`(短号自动换成真实房间号,csrf 取 cookie 里的 `bili_jct`),
+  失败在输入条里就地说明原因(未登录/缺 csrf/太频繁/被风控…),不打网络就能确定的错误先本地拦住。
+  **发到哪个房间不需要额外配置**:per-room 窗口发自己那个房间 → `config.yaml` 的 `rooms` →
+  正在收的弹幕带来的那个房间(dmnotifier 订阅的)→ dmnotifier `config.yaml` 的 history。
+  也就是说「能看就能发」——收弹幕不需要登录,cookie 只用于发送;
+  cookie 取值顺序:`--room bilibili:rid:cookie` → `config.yaml` 的 `send_cookie` →
+  dmnotifier history 里该房间的 cookie。锁定(穿透)时输入框只读并提示「解锁后可发送弹幕」
 - 全窗口点击穿透(默认开;托盘菜单可切),不挡鼠标点选下层窗口(穿透与设置项经托盘菜单验证,未做物理点击注入测试)
 - dmnotifier 断线自动重连(重连期间窗口显示"离线,连接中…")
 - 无头演示:`uv run bilidm-overlay --demo`
@@ -85,6 +94,12 @@ scripts/start.sh --room bilibili:689422
 # 多房间,或带 cookie(bilibili:789422:COOKIE 格式,只取前两个冒号)
 scripts/start.sh --room bilibili:689422 --room bilibili:789422
 
+# 不要底部发送栏(纯展示):
+uv run bilidm-overlay --room bilibili:689422 --no-send
+
+# 单独给发送用的登录 cookie(不带 --room 里的 cookie 时):
+uv run bilidm-overlay --room bilibili:689422 --send-cookie 'SESSDATA=…; bili_jct=…'
+
 # 停止:停止 UniBarrage 监听 + 杀掉 overlay
 scripts/stop.sh --room bilibili:689422
 ```
@@ -113,7 +128,8 @@ binds = { Mod+G = spawn "bash" "-c" "/home/lumorian/Projects/bili-dm/overlay/scr
 
 ## 配置
 
-- `~/.config/bilidm-overlay/config.yaml` — 悬浮窗宽度/位置/字号/主题(dark|light)/透明度/行数/点击穿透(缺省即内置默认)
+- `~/.config/bilidm-overlay/config.yaml` — 悬浮窗宽度/位置/字号/主题(dark|light)/透明度/行数/点击穿透(缺省即内置默认),
+  以及发弹幕的 `send_enabled` / `send_cookie`(后者含 `SESSDATA` 与 `bili_jct`,等同登录态,注意别外传)
 - `~/.config/dmnotifier/config.yaml` — dmnotifier 侧:pipeline 插件(需启用 `float`)
 
 ## 开发

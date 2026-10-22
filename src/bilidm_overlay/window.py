@@ -33,11 +33,16 @@ from PyQt6.QtWidgets import (
 
 from .config import Config, save
 from .danmaku.avatars import AvatarCache
+from .danmaku.composer import Composer
+from .danmaku.echo import EchoTracker
 from .danmaku.lifecycle import Wall
 from .danmaku.model import Danmaku
 from .danmaku.theme import panel_rgb
 from .danmaku.wall import PANEL_RADIUS, WallWidget
+from .keyboard import apply_keyboard_interactivity
 from .layershell_qt_compat import ensure_for_session
+from .sender import parse_csrf, pick_observed_room, validate_text
+from .submit import DanmakuSubmitter, Identity, target_for
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +75,9 @@ class DanmakuWindow(QWidget):
         self._last_feed: float | None = None  # 最后一条弹幕的单调时钟(空闲隐藏用)
         self._passthrough = cfg.click_through
         self._status = ""
+        # 从流动的弹幕里学到的房间(platform:rid)。没有 --room/配置时,这是唯一
+        # 知道"该发到哪"的来源:能收到弹幕就说明房间是活着的、合法的。
+        self._observed_room: str | None = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(RENDER_INTERVAL_MS)
@@ -143,6 +151,20 @@ class DanmakuWindow(QWidget):
         self._status_label.setStyleSheet("color: #9AA0A6; font-size: 11px; padding-left: 6px;")
         self._status_label.setVisible(False)
 
+        # 发弹幕:输入条贴在卡片底边(官方面板输入条的位置),回显去重负责
+        # 不让"本地插一行 + ws 再推一行"变成两条。
+        self._composer = Composer(self, theme=getattr(cfg, "theme", "dark"))
+        self._composer.set_font(cfg.font_family, cfg.font_size)
+        self._composer.submitted.connect(self._on_submit)
+        # 初始锁定态跟随窗口:set_passthrough 在构造时已经跑过一遍(那时输入条还不存在)
+        self._composer.set_locked(self._passthrough)
+        self._send_enabled = bool(getattr(cfg, "send_enabled", True))
+        self._composer.setVisible(self._send_enabled)
+        self._echo = EchoTracker()
+        self._submitter = DanmakuSubmitter()
+        self._submitter.submitted_ok.connect(self._on_sent)
+        self._submitter.failed.connect(self._on_send_failed)
+
         # 按钮带 + 弹幕墙包进同一容器(间距 0):带底色与卡片一致,按钮落在卡片内部
         # 右上角,随卡片高度变化整体移动——kotonoha 同款"控制条在卡片内"结构。
         self._container = QWidget(self)
@@ -151,6 +173,7 @@ class DanmakuWindow(QWidget):
         card_layout.setSpacing(0)
         card_layout.addWidget(self._control_bar)
         card_layout.addWidget(self._wall_widget)
+        card_layout.addWidget(self._composer)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -165,10 +188,22 @@ class DanmakuWindow(QWidget):
 
     # --- 对外接口 ---
     def feed(self, d: Danmaku) -> None:
+        if d.platform and d.rid:
+            # 记下正在流动的房间:发弹幕时若没有更确定的来源(per-room 窗口/配置房间),
+            # 就发回这里 —— 收到弹幕本身就证明它可用。多房间时不让目标来回跳(见
+            # pick_observed_room)。
+            self._observed_room = pick_observed_room(
+                self._observed_room, f"{d.platform}:{d.rid}"
+            )
         if self._room_filter is not None:
             key = f"{d.platform}:{d.rid}"
             if d.rid and d.platform and key != self._room_filter:
                 return
+        # 自己刚发的那条已经本地回显过,ws 再推进来一次就重复了
+        echo = getattr(self, "_echo", None)
+        if echo is not None and echo.consume(d):
+            self._last_feed = time.monotonic()
+            return
         self._wall.add(d)
         self._last_feed = time.monotonic()
         # 同步推给绘制 widget:_tick 只在事件循环里跑,同步测试无法先等到下一帧
@@ -204,10 +239,17 @@ class DanmakuWindow(QWidget):
                 WindowPolicy(
                     transparent_for_input=on,
                     mouse_events_transparent=on,
-                    does_not_accept_focus=True,
+                    # 锁定(穿透)态不该抢焦点;解锁后要能打字,必须允许接受焦点
+                    does_not_accept_focus=on,
                     recreate_surface=False,
                 )
             )
+        # 键盘交互跟随锁定态:层壳表面的 KeyboardInteractivityNone 让输入框永远拿不到
+        # 按键,解锁(可交互)时才打开;锁定态关回去,别去抢聚焦窗口的输入。
+        self._apply_keyboard(not on)
+        composer = getattr(self, "_composer", None)
+        if composer is not None:
+            composer.set_locked(on)
         self._update_lock_icon()
 
     def _input_region(self) -> WindowRectangle | None:
@@ -391,6 +433,90 @@ class DanmakuWindow(QWidget):
         lock.setIcon(lock_icon(self._passthrough, CONTROL_ICON_COLOR))
         lock.setToolTip("已锁定" if self._passthrough else "已解锁")
 
+    # --- 发弹幕 ---
+    def _apply_keyboard(self, enabled: bool) -> None:
+        """把键盘交互交给平台桥(层壳表面默认收不到按键,见 keyboard 模块)。
+
+        只在解锁(可交互)时打开:锁定态窗口整块在往外放行鼠标,这时抢键盘焦点
+        只会把用户正在打字的别的窗口顶掉。
+        """
+        apply_keyboard_interactivity(self._platform, self._host, enabled)
+
+    def set_send_enabled(self, enabled: bool) -> None:
+        """显示/隐藏底部发送栏(设置对话框里的开关,即时生效)。"""
+        self._send_enabled = enabled
+        self._composer.setVisible(enabled)
+        if enabled:
+            self._composer.set_locked(self._passthrough)
+
+    def composer(self) -> Composer:
+        return self._composer
+
+    def _on_submit(self, text: str) -> None:
+        """发送栏点了发送:先在本地说清楚"发不了"的原因,再交给后台线程。"""
+        text = text.strip()
+        problem = validate_text(text)
+        if problem:
+            self._composer.flash(problem, error=True)
+            return
+        # 房间来源:per-room 窗口绑定的房间 → 配置里的房间 → 正在收弹幕的这个房间。
+        # 最后一档是必须的:房间是 dmnotifier 订阅的,overlay 完全可以没有任何 --room
+        # 配置却在收弹幕,此时不让发毫无道理。
+        target = target_for(self._cfg, self._room_filter, self._observed_room)
+        if target is None:
+            self._composer.flash(
+                "还没收到过弹幕,不知道发到哪个房间:先在设置里添加直播间", error=True
+            )
+            return
+        if target.platform != "bilibili":
+            self._composer.flash(
+                f"暂只支持向 B 站直播间发送弹幕(当前 {target.platform})", error=True
+            )
+            return
+        if not parse_csrf(target.cookie):
+            # 收弹幕不需要登录(匿名也能看),发弹幕才需要 —— 这一条必须说清,否则
+            # "我能看却不能发"看起来像 bug。
+            self._composer.flash(
+                "看弹幕不用登录,发弹幕需要:设置里填一次登录 cookie(含 bili_jct)", error=True
+            )
+            return
+        # 期望先登记:回推可能比 HTTP 响应先到,晚登记就会漏掉一条去重
+        self._echo.expect(text)
+        if not self._submitter.submit(target, text):
+            self._echo.cancel(text)
+            return
+        self._composer.set_busy(True)
+
+    def _on_sent(self, text: str, identity: object, target: object) -> None:
+        """发送成功:立刻本地回显自己那条(官方弹幕姬同样即时上屏)。"""
+        self._composer.set_busy(False)
+        self._composer.clear()
+        ident = identity if isinstance(identity, Identity) else None
+        if ident is not None:
+            # 有了 uid,后面的回推就必须 uid 也对上,别把别人的同一句话吞掉
+            self._echo.bind_uid(ident.uid)
+        own = Danmaku(
+            type="chat",
+            platform=getattr(target, "platform", "bilibili"),
+            rid=getattr(target, "rid", ""),
+            name=ident.name if ident is not None else "我",
+            content=text,
+            uid=ident.uid if ident is not None else "",
+            avatar=ident.avatar if ident is not None else "",
+        )
+        # 直接入墙,不走 feed():feed 会拿这条去抵扣它自己的那条期望记录
+        self._wall.add(own)
+        self._last_feed = time.monotonic()
+        self._wall_widget.update_wall(self._wall)
+        if not self.isVisible():
+            self.show()
+        self._composer.flash("已发送")
+
+    def _on_send_failed(self, text: str, message: str) -> None:
+        self._composer.set_busy(False)
+        self._echo.cancel(text)
+        self._composer.flash(message, error=True)
+
     # --- 内部 ---
     def _tick(self) -> None:
         # 无时间淡出:画面只在有新弹幕时变化;定时器仅服务"无新消息"空闲自动隐藏
@@ -424,6 +550,7 @@ class DanmakuWindow(QWidget):
         dialog = SettingsDialog(self, self._cfg)
         if dialog.exec():
             (size, opacity, rows, width, height, mode, theme) = dialog.values()
+            send_enabled, send_cookie = dialog.send_values()
             (
                 self._cfg.font_size,
                 self._cfg.opacity,
@@ -432,9 +559,14 @@ class DanmakuWindow(QWidget):
                 self._cfg.height,
                 self._cfg.mode,
                 self._cfg.theme,
-            ) = (size, opacity, rows, width, height, mode, theme)
+                self._cfg.send_enabled,
+                self._cfg.send_cookie,
+            ) = (size, opacity, rows, width, height, mode, theme, send_enabled, send_cookie)
             self._wall_widget.set_font(self._cfg.font_family, size)
             self._wall_widget.set_theme(self._cfg.theme)
+            self._composer.set_theme(self._cfg.theme)
+            self._composer.set_font(self._cfg.font_family, size)
+            self.set_send_enabled(send_enabled)
             self._apply_card_background(opacity)
             # 行数上限变更即时生效;行数变更清空重来(与 v1 约定一致)
             self._wall = Wall(max_rows=rows)

@@ -36,6 +36,11 @@ class Config:
     click_through: bool = True
     hide_when_idle_seconds: int = 0
     no_tray: bool = False
+    # 发弹幕:卡片底部输入条(官方弹幕姬同款)。cookie 是发送用的登录态
+    # (需含 SESSDATA + bili_jct),留空则沿用 --room 里带的 cookie 或
+    # dmnotifier history 中该房间的 cookie。
+    send_enabled: bool = True
+    send_cookie: str = ""
     # UniBarrage 连接(房间管理对话框用;默认与 dmnotifier 的 server 段一致)
     api_address: str = field(default_factory=default_api_address)
     api_token: str = field(default_factory=default_api_token)
@@ -57,7 +62,7 @@ def load(path: Path | None = None) -> Config:
     for k, v in data.items():
         if not hasattr(cfg, k):
             continue
-        if k == "socket" and isinstance(v, str):
+        if k in ("socket", "send_cookie") and isinstance(v, str):
             v = _expand(v)
         setattr(cfg, k, v)
     return cfg
@@ -74,6 +79,10 @@ def merge_cli(cfg: Config, args: argparse.Namespace) -> Config:
         cfg.mode = "merged"
     if getattr(args, "no_tray", None):
         cfg.no_tray = True
+    if getattr(args, "no_send", None):
+        cfg.send_enabled = False
+    if getattr(args, "send_cookie", None):
+        cfg.send_cookie = args.send_cookie
     if getattr(args, "theme", None):
         cfg.theme = args.theme
     return cfg
