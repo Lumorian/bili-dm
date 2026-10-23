@@ -61,18 +61,22 @@ def test_window_accepts_danmaku(app):
 
 
 def test_control_bar_right_aligned_with_lock_left_of_settings(app):
-    """按钮右对齐(stretch 在前),锁在最左、设置在最右,与 kotonoha 截图一致。"""
+    """徽标贴左,按钮组右对齐:锁在设置左边,与 kotonoha 截图一致。"""
     win = DanmakuWindow(_cfg(click_through=False))
     layout = win._control_bar.layout()
-    assert layout.itemAt(0).spacerItem() is not None, "按钮组应右对齐:首个项目是 stretch"
+    spacer_at = next(
+        i for i in range(layout.count()) if layout.itemAt(i).spacerItem() is not None
+    )
     widgets = [
         layout.itemAt(i).widget()
         for i in range(layout.count())
         if layout.itemAt(i).widget() is not None
     ]
-    assert widgets == [win._lock_btn, win._settings_btn]
+    assert widgets == [win._stats_label, win._lock_btn, win._settings_btn]
+    assert layout.indexOf(win._stats_label) < spacer_at, "在线徽标贴左"
+    assert spacer_at < layout.indexOf(win._lock_btn), "按钮组在 stretch 右侧"
     # 圆形固定尺寸 22×22(kotonoha CONTROL_BUTTON_STYLE 同款),并已设置图标
-    for b in widgets:
+    for b in (win._lock_btn, win._settings_btn):
         assert (b.minimumSize().width(), b.maximumSize().height()) == (22, 22)
         assert not b.icon().isNull()
 
@@ -205,6 +209,13 @@ def test_per_room_filter_drops_other_rooms(app):
     assert win.row_count() == 1
 
 
+def test_per_room_filter_accepts_cookie_chain(app):
+    """--room 的 cookie 段不参与窗口过滤,否则带 cookie 启动会一条都收不到。"""
+    win = DanmakuWindow(_cfg(), room_filter="bilibili:1:COOKIE")
+    win.feed(Danmaku(type="chat", platform="bilibili", rid="1", name="B", content="mine"))
+    assert win.row_count() == 1
+
+
 def test_idle_hide_after_no_new_messages(app, monkeypatch):
     """弹幕不再过期后,hide_when_idle 语义为"超过 N 秒没有新弹幕"才隐藏窗口。"""
     import time
@@ -281,6 +292,7 @@ def test_second_instance_exits_when_socket_taken(tmp_path, monkeypatch, caplog):
             main, "QApplication", lambda argv: QApplication.instance() or QApplication(argv)
         )
         monkeypatch.setattr(main, "load", lambda p: Config(socket=sock))
+        monkeypatch.setattr(main, "dmnotifier_history_rooms", list)
         monkeypatch.setattr(qasync.QEventLoop, "add_signal_handler", lambda self, sig, cb: None)
         monkeypatch.setattr(sys, "argv", ["bilidm-overlay", "--socket", sock, "--no-tray"])
 
@@ -296,6 +308,78 @@ def test_second_instance_exits_when_socket_taken(tmp_path, monkeypatch, caplog):
             os.unlink(sock)
 
 
+# --- 右上角在线人数徽标 ---
+
+
+def _stats(rid="689422", live_status=1, online=12345, online_text="1.2万", **kw):
+    from bilidm_overlay.roomstats import RoomStats
+
+    defaults = {
+        "rid": rid,
+        "room_id": rid,
+        "uname": "主播",
+        "title": "直播间标题",
+        "area": "虚拟 · 虚拟主播",
+        "live_status": live_status,
+        "online": online,
+        "online_text": online_text,
+        "popularity": 3_456_789,
+        "attention": 1123,
+    }
+    defaults.update(kw)
+    return RoomStats(**defaults)
+
+
+def test_online_badge_shows_live_online_count(app):
+    win = DanmakuWindow(_cfg())
+    win.set_room_stats({"bilibili:689422": _stats()})
+    assert win._stats_label.isVisibleTo(win) is True
+    assert "直播中" in win._stats_label.text()
+    assert "1.2万" in win._stats_label.text()
+    assert "在线用户:1.2万" in win._stats_label.toolTip()
+    win.hide_window()
+
+
+def test_online_badge_offline_shows_status_without_count(app):
+    win = DanmakuWindow(_cfg())
+    win.set_room_stats({"bilibili:689422": _stats(live_status=0, online=None, online_text="")})
+    assert "未开播" in win._stats_label.text()
+    assert "在线" not in win._stats_label.text()
+    win.hide_window()
+
+
+def test_online_badge_merged_sums_live_rooms(app):
+    win = DanmakuWindow(_cfg())
+    win.set_room_stats({
+        "bilibili:1": _stats(rid="1", online=1000, online_text="1000"),
+        "bilibili:2": _stats(rid="2", online=2000, online_text="2000"),
+        "bilibili:3": _stats(rid="3", live_status=0, online=None, online_text=""),
+    })
+    text = win._stats_label.text()
+    assert "2 个直播间直播中" in text
+    assert "在线 3000" in text
+    win.hide_window()
+
+def test_online_badge_per_room_only_shows_own_room(app):
+    win = DanmakuWindow(_cfg(), room_filter="bilibili:1")
+    win.set_room_stats({
+        "bilibili:1": _stats(rid="1", online=111, online_text="111"),
+        "bilibili:2": _stats(rid="2", online=222, online_text="222"),
+    })
+    assert "111" in win._stats_label.text()
+    assert "222" not in win._stats_label.text()
+    win.hide_window()
+
+
+def test_online_badge_can_be_turned_off(app):
+    win = DanmakuWindow(_cfg())
+    win.set_room_stats({"bilibili:689422": _stats()})
+    win.set_show_online(False)
+    assert win._stats_label.isVisibleTo(win) is False
+    win.set_show_online(True)
+    assert win._stats_label.isVisibleTo(win) is True
+    win.hide_window()
+
 # --- 设置对话框:主题下拉与 values() 元组 ---
 
 
@@ -305,12 +389,28 @@ def test_settings_values_include_theme(app):
 
     dialog = SettingsDialog(None, Config())
     values = dialog.values()
-    assert len(values) == 7
-    assert values[-1] == "dark"  # 默认深色
-    dialog._theme.setCurrentText("light")
-    assert dialog.values()[-1] == "light"
+    assert len(values) == 8
+    assert values[6] == "dark"  # 默认深色
+    assert values[7] is True  # 默认显示在线人数
+    dialog._theme.setCurrentIndex(1)  # 浅色
+    assert dialog.values()[6] == "light"
     dialog.close()
 
+
+def test_settings_dialog_uses_custom_frameless_shell_and_spin_values(app):
+    from PyQt6.QtCore import Qt
+
+    from bilidm_overlay.config import Config
+    from bilidm_overlay.settings import SettingsDialog
+
+    dialog = SettingsDialog(None, Config())
+    assert dialog.windowFlags() & Qt.WindowType.FramelessWindowHint
+    assert "QFrame#panel" in dialog.styleSheet()
+    dialog._opacity.setValue(92)
+    assert abs(dialog.values()[1] - 0.92) < 1e-9
+    dialog._mode.setCurrentIndex(1)
+    assert dialog.values()[5] == "per-room"
+    dialog.close()
 
 def test_settings_max_rows_default_comes_from_config(app):
     from bilidm_overlay.config import Config
@@ -319,6 +419,6 @@ def test_settings_max_rows_default_comes_from_config(app):
     cfg = Config()
     cfg.theme = "light"
     dialog = SettingsDialog(None, cfg)
-    assert dialog.values()[-1] == "light"
+    assert dialog.values()[6] == "light"
     dialog.close()
 

@@ -16,6 +16,8 @@ def test_defaults():
     assert cfg.click_through is True
     assert cfg.opacity == 0.85
     assert cfg.position == [24, 100]
+    assert cfg.show_online is True
+    assert cfg.online_refresh_seconds == 30
 
 
 def test_load_expands_env_and_yaml(tmp_path, monkeypatch):
@@ -97,3 +99,11 @@ def test_cli_theme_overrides(tmp_path):
 
 def test_font_size_default_is_official_12px():
     assert Config().font_size == 12  # 官方 .chat-history-list{font-size:12px}
+
+
+def test_online_settings_load_from_yaml(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("show_online: false\nonline_refresh_seconds: 60\n", encoding="utf-8")
+    cfg = load(path)
+    assert cfg.show_online is False
+    assert cfg.online_refresh_seconds == 60

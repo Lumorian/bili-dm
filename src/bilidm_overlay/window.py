@@ -16,7 +16,7 @@ from kotonoha.platform import (
     default_package_dir,
 )
 from kotonoha.platform.overlay_contracts import DragMode
-from PyQt6.QtCore import QPoint, QSize, Qt, QTimer
+from PyQt6.QtCore import QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QGuiApplication, QMouseEvent
 from PyQt6.QtWidgets import (
     QApplication,
@@ -37,11 +37,12 @@ from .danmaku.composer import Composer
 from .danmaku.echo import EchoTracker
 from .danmaku.lifecycle import Wall
 from .danmaku.model import Danmaku
-from .danmaku.theme import panel_rgb
+from .danmaku.theme import panel_rgb, theme_for
 from .danmaku.wall import PANEL_RADIUS, WallWidget
 from .keyboard import apply_keyboard_interactivity
 from .layershell_qt_compat import ensure_for_session
-from .sender import parse_csrf, pick_observed_room, validate_text
+from .roomstats import RoomStats, format_count
+from .sender import parse_csrf, pick_observed_room, split_room, validate_text
 from .submit import DanmakuSubmitter, Identity, target_for
 
 logger = logging.getLogger(__name__)
@@ -67,14 +68,24 @@ QToolButton:pressed { background: rgba(255, 255, 255, 90); }
 
 
 class DanmakuWindow(QWidget):
+    show_online_changed = pyqtSignal(bool)
+
     def __init__(self, cfg: Config, room_filter: str | None = None, show_tag: bool = False) -> None:
         super().__init__()
         self._cfg = cfg
+        # per-room 传进来的可能是 "platform:rid:cookie";过滤键只用前两段,
+        # 否则带 cookie 启动的窗口既收不到弹幕,在线徽标也会一直空着。
+        if room_filter:
+            platform, rid, _ = split_room(room_filter)
+            room_filter = f"{platform}:{rid}" if platform and rid else room_filter
         self._room_filter = room_filter
         self._wall = Wall(max_rows=cfg.max_rows)
         self._last_feed: float | None = None  # 最后一条弹幕的单调时钟(空闲隐藏用)
         self._passthrough = cfg.click_through
         self._status = ""
+        # 右上角在线徽标:数据由 main 里的 RoomStatsPoller 统一喂给所有窗口
+        self._show_online = bool(getattr(cfg, "show_online", True))
+        self._room_stats: dict[str, RoomStats] = {}
         # 从流动的弹幕里学到的房间(platform:rid)。没有 --room/配置时,这是唯一
         # 知道"该发到哪"的来源:能收到弹幕就说明房间是活着的、合法的。
         self._observed_room: str | None = None
@@ -241,6 +252,88 @@ class DanmakuWindow(QWidget):
         self._status = text
         self._status_label.setVisible(bool(text))
         self._status_label.setText(text)
+
+    # --- 在线人数徽标 ---
+    def set_room_stats(self, stats: dict[str, RoomStats]) -> None:
+        """喂入最新一轮直播间快照(main 的 poller 广播给所有窗口)。"""
+        self._room_stats = dict(stats or {})
+        self._refresh_stats_label()
+
+    def set_show_online(self, enabled: bool) -> None:
+        """设置里开关在线徽标;关掉后 main 侧也会停掉轮询(经信号)。"""
+        enabled = bool(enabled)
+        changed = enabled != self._show_online
+        self._show_online = enabled
+        self._refresh_stats_label()
+        if changed:
+            self.show_online_changed.emit(enabled)
+
+    def _visible_stats(self) -> list[RoomStats]:
+        """当前窗口该显示哪些房间:per-room 只看自己,merged 看所有已知房间。"""
+        stats = list(self._room_stats.values())
+        if self._room_filter:
+            stats = [s for s in stats if s.key == self._room_filter]
+        # 正在直播的排前面;同一状态按房间号稳定排序,避免刷新时顺序抖动
+        return sorted(stats, key=lambda s: (not s.live, s.key))
+
+    def _refresh_stats_label(self) -> None:
+        label = getattr(self, "_stats_label", None)
+        if label is None:
+            return
+        stats = self._visible_stats() if self._show_online else []
+        if not stats:
+            label.setVisible(False)
+            label.setText("")
+            label.setToolTip("")
+            return
+        theme = theme_for(getattr(self._cfg, "theme", "dark"))
+        muted = "#9AA0A6" if theme.name == "dark" else "#61666D"
+        label.setStyleSheet(f"color: {muted}; font-size: 11px;")
+        label.setText(self._stats_html(stats, theme.brand_pink))
+        label.setToolTip(self._stats_tooltip(stats))
+        label.setVisible(True)
+
+    @staticmethod
+    def _stats_html(stats: list[RoomStats], live_color: str) -> str:
+        """一行式徽标:单房间精确到在线数,多房间给直播数与在线总数。"""
+        live = [s for s in stats if s.live]
+        if len(stats) == 1:
+            one = stats[0]
+            color = live_color if one.live else "#757A81"
+            detail = f" · {one.online_label}" if one.online_label else ""
+            return f'<span style="color:{color};">●</span> {one.status_text}{detail}'
+        if not live:
+            return f'<span style="color:#757A81;">○</span> {len(stats)} 个直播间均未开播'
+        known = [s.online for s in live if s.online is not None]
+        detail = f" · 在线 {format_count(sum(known))}" if known else ""
+        return (
+            f'<span style="color:{live_color};">●</span> {len(live)} 个直播间直播中'
+            f"{detail}"
+        )
+
+    @staticmethod
+    def _stats_tooltip(stats: list[RoomStats]) -> str:
+        """悬停看房间标题/分区/人气/粉丝数;数字和在线标签同一套缩写。"""
+        blocks: list[str] = []
+        for s in stats:
+            name = s.uname or s.rid
+            head = f"{name} · {s.status_text}"
+            lines = [head]
+            if s.title:
+                lines.append(s.title)
+            if s.area:
+                lines.append(f"分区:{s.area}")
+            if s.live:
+                if s.online_text:
+                    lines.append(f"在线用户:{s.online_text}")
+                elif s.online is not None:
+                    lines.append(f"在线用户:{s.online}")
+                if s.popularity:
+                    lines.append(f"人气:{format_count(s.popularity)}")
+            if s.attention:
+                lines.append(f"粉丝:{format_count(s.attention)}")
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks)
 
     def set_passthrough(self, on: bool) -> None:
         """锁定=除按钮带外全窗口点击穿透;解锁=窗口全区域可交互(拖动/缩放)。
@@ -428,9 +521,18 @@ class DanmakuWindow(QWidget):
         # (实测 196px),按钮因此悬浮在卡片中部——kotonoha 的按钮必须贴在卡片顶。
         bar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(0, 6, 10, 0)  # 上 6px、右 10px 留白,按钮不贴卡片顶/右缘
+        layout.setContentsMargins(10, 6, 10, 0)  # 上 6px、左右 10px 留白
         layout.setSpacing(6)
-        layout.addStretch(1)  # 先前置 stretch,按钮组整体贴右缘(右上角)
+        # 左侧在线徽标(直播中/未开播 + 当前在线用户);没数据时隐藏,不占视觉
+        self._stats_label = QLabel("", bar)
+        self._stats_label.setTextFormat(Qt.TextFormat.RichText)
+        self._stats_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        self._stats_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
+        self._stats_label.setVisible(False)
+        layout.addWidget(self._stats_label)
+        layout.addStretch(1)  # 徽标贴左、按钮组贴右(右上角)
 
         self._lock_btn = self._make_control_button(bar)
         self._lock_btn.clicked.connect(lambda: self.set_passthrough(not self._passthrough))
@@ -599,7 +701,7 @@ class DanmakuWindow(QWidget):
 
         dialog = SettingsDialog(self, self._cfg)
         if dialog.exec():
-            (size, opacity, rows, width, height, mode, theme) = dialog.values()
+            (size, opacity, rows, width, height, mode, theme, show_online) = dialog.values()
             send_enabled, send_cookie = dialog.send_values()
             (
                 self._cfg.font_size,
@@ -609,13 +711,27 @@ class DanmakuWindow(QWidget):
                 self._cfg.height,
                 self._cfg.mode,
                 self._cfg.theme,
+                self._cfg.show_online,
                 self._cfg.send_enabled,
                 self._cfg.send_cookie,
-            ) = (size, opacity, rows, width, height, mode, theme, send_enabled, send_cookie)
+            ) = (
+                size,
+                opacity,
+                rows,
+                width,
+                height,
+                mode,
+                theme,
+                show_online,
+                send_enabled,
+                send_cookie,
+            )
             self._wall_widget.set_font(self._cfg.font_family, size)
             self._wall_widget.set_theme(self._cfg.theme)
             self._composer.set_theme(self._cfg.theme)
             self._composer.set_font(self._cfg.font_family, size)
+            self._refresh_stats_label()  # 主题切换后徽标文字色跟上
+            self.set_show_online(show_online)
             self.set_send_enabled(send_enabled)
             self._apply_card_background(opacity)
             # 行数上限变更即时生效;行数变更清空重来(与 v1 约定一致)

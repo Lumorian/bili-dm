@@ -17,6 +17,9 @@ from PyQt6.QtWidgets import QApplication
 from .client import DanmakuServer
 from .config import Config, load, merge_cli
 from .danmaku.model import Danmaku, MedalInfo
+from .roomstats import RoomStats
+from .sender import dmnotifier_history_rooms
+from .statspoller import RoomStatsPoller
 from .window import DanmakuWindow
 
 logger = logging.getLogger(__name__)
@@ -70,6 +73,25 @@ async def _demo_gen(sink: list[Danmaku]) -> None:
         await asyncio.sleep(0.4)
 
 
+def _demo_stats() -> dict[str, RoomStats]:
+    """--demo 的假在线数据:不联网也能看到右上角徽标的完整形态。"""
+    return {
+        "bilibili:689422": RoomStats(
+            rid="689422",
+            room_id="689422",
+            uid="9318551",
+            uname="演示主播",
+            title="演示直播间 · 在线人数徽标",
+            area="虚拟 · 虚拟主播",
+            live_status=1,
+            online=12345,
+            online_text="1.2万",
+            popularity=3_456_789,
+            attention=1123,
+        )
+    }
+
+
 def _build_windows(cfg: Config) -> list[DanmakuWindow]:
     if cfg.mode == "per-room":
         windows = []
@@ -117,8 +139,37 @@ def entry_point() -> None:
     windows = _build_windows(cfg)
     server: DanmakuServer | None = None
     exit_code = 0
+
+    # 在线人数轮询:所有窗口共享一份数据(per-room 窗口各自筛自己的房间)。
+    # 即使配置里关掉了也保留 poller 对象:设置里重新打开时能立即开始,不用重启。
+    poller = RoomStatsPoller(
+        interval_seconds=int(getattr(cfg, "online_refresh_seconds", 30)),
+        parent=app,
+    )
+
+    def _broadcast_stats(stats: dict[str, RoomStats]) -> None:
+        for w in windows:
+            w.set_room_stats(stats)
+
+    poller.updated.connect(_broadcast_stats)
     if not args.demo:
-        server = DanmakuServer(cfg.socket, lambda d: [w.feed(d) for w in windows])
+        seed_rooms = [r for r in cfg.rooms if r] or dmnotifier_history_rooms()
+        poller.set_rooms(seed_rooms)
+        if getattr(cfg, "show_online", True):
+            poller.start()
+    for w in windows:
+        w.show_online_changed.connect(
+            lambda enabled: poller.start() if enabled else poller.stop()
+        )
+
+    if not args.demo:
+        def _feed(d: Danmaku) -> None:
+            # 没配 --room/配置时,从流过的弹幕里发现房间,在线徽标也能跟上
+            poller.watch(d.platform, d.rid)
+            for w in windows:
+                w.feed(d)
+
+        server = DanmakuServer(cfg.socket, _feed)
 
         status_check = QTimer()
         status_check.setInterval(1000)
@@ -130,6 +181,10 @@ def entry_point() -> None:
 
         status_check.timeout.connect(_update_status)
         status_check.start()
+
+    if args.demo:
+        for w in windows:
+            w.set_room_stats(_demo_stats())
 
     async def _run() -> None:
         # 信号先行:即使 server 启动失败,退出也走已注册的 loop.stop() 清理路径。
@@ -157,6 +212,7 @@ def entry_point() -> None:
             asyncio.create_task(_demo_loop())
 
     async def _stop() -> None:
+        poller.stop()
         if server is not None:
             await server.stop()
 

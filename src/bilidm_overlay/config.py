@@ -36,6 +36,10 @@ class Config:
     click_through: bool = True
     hide_when_idle_seconds: int = 0
     no_tray: bool = False
+    # 直播间在线人数(右上角徽标):开播状态 + 当前在线用户,来自 B 站公开接口。
+    # 关掉后完全不发网络请求;刷新间隔只影响请求频率,不影响弹幕实时性。
+    show_online: bool = True
+    online_refresh_seconds: int = 30
     # 发弹幕:卡片底部输入条(官方弹幕姬同款)。cookie 是发送用的登录态
     # (需含 SESSDATA + bili_jct),留空则沿用 --room 里带的 cookie 或
     # dmnotifier history 中该房间的 cookie。

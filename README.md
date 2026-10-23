@@ -7,6 +7,10 @@
 ## 功能
 
 - 悬浮滚动墙:Chat/礼物/SC/订阅分别着色与加粗/描边;**行数按面板高度自适应,新消息自动滚到底部**;无时间淡出——弹幕一直保留,直到新弹幕顶替旧行(墙内按行数上限计数淘汰)
+- **当前直播间在线人数(仿官方弹幕姬右上角)**:卡片右上角常驻 `● 直播中 · 在线 1.2万` /
+  `○ 未开播`;数字取 B 站高能榜接口的 `onlineNum`(官方缩写 `13万+`/`9999+`),
+  不是会把热度当人数的 `get_info.online`;匿名即可查询,每 30s 刷新。多房间合并模式显示
+  直播中房间数与在线总数,悬停可看标题/分区/人气/粉丝数;设置里可关闭(关闭后不发请求)。
 - **可上下翻阅历史**:滚轮(一次 3 行)、右侧细滚动条(可拖)、PageUp/PageDown、Home/End、
   托盘「回到最新弹幕」;像素级滚动(上滚一点内容就动一点,不整行跳变)。往上翻时新弹幕
   不会把画面顶走,右下角提示「↓ N 条新弹幕」,点一下或滚到底即恢复跟随最新。
@@ -134,7 +138,8 @@ binds = { Mod+G = spawn "bash" "-c" "/home/lumorian/Projects/bili-dm/overlay/scr
 ## 配置
 
 - `~/.config/bilidm-overlay/config.yaml` — 悬浮窗宽度/位置/字号/主题(dark|light)/透明度/行数/点击穿透(缺省即内置默认),
-  以及发弹幕的 `send_enabled` / `send_cookie`(后者含 `SESSDATA` 与 `bili_jct`,等同登录态,注意别外传)
+  在线徽标的 `show_online` / `online_refresh_seconds`,以及发弹幕的 `send_enabled` / `send_cookie`
+  (后者含 `SESSDATA` 与 `bili_jct`,等同登录态,注意别外传)
 - `~/.config/dmnotifier/config.yaml` — dmnotifier 侧:pipeline 插件(需启用 `float`)
 
 ## 开发
